@@ -35,7 +35,7 @@ replace_once(
     "correct orientation OSD label",
 )
 
-panel = root / "src/gui/wxgui/input/WiimoteInputPanel.cpp"
+panel = root / "src/gui/wxgui/input/panels/WiimoteInputPanel.cpp"
 replace_once(
     panel,
     '''\tconst int selection = joycon->get_joycon_orientation() == SDLController::JoyConOrientation::Vertical ? 1 : 0;\n''',
