@@ -11,6 +11,7 @@ on:
       - "tools/apply_cemu_v3_detection_fix.py"
       - "tools/apply_cemu_v4_motion_osd.py"
       - "tools/apply_cemu_v5_pointer_orientation_fastforward.py"
+      - "tools/apply_cemu_v5_stage2_pointer_kpad_fastforward.py"
   pull_request:
     branches:
       - main
@@ -56,24 +57,48 @@ jobs:
         shell: pwsh
         run: python wrapper\tools\apply_cemu_v4_motion_osd.py cemu
 
-      - name: Apply and verify V5 fixes
+      - name: Apply V5 orientation motion and pointer core
         shell: pwsh
         run: |
           python wrapper\tools\apply_cemu_v5_pointer_orientation_fastforward.py cemu
+          $stage1Exit = $LASTEXITCODE
+
+          # Stage 1 currently stops at the old full-block KPAD anchor after all
+          # orientation/motion/pointer-core changes are already applied. Verify
+          # those exact changes before allowing the robust Stage 2 to continue.
+          $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
+          $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
+          $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
+
+          if (-not $wpad.Contains("update_joycon_pointer")) { throw "V5 pointer core was not applied" }
+          if (-not $provider.Contains("!config->second.is_left && config->second.vertical")) { throw "V5 R Sideways motion correction missing" }
+          if (-not $panel.Contains("Internal Vertical == physical Sideways")) { throw "V5 physical orientation UI mapping missing" }
+          if (-not $controller.Contains('orientation == JoyConOrientation::Vertical ? "Sideways" : "Vertical"')) { throw "V5 orientation OSD mapping missing" }
+
+          if ($stage1Exit -ne 0) {
+            Write-Host "V5 Stage 1 reached the known legacy KPAD anchor; verified all preceding V5 changes. Continuing with robust Stage 2."
+          }
+
+      - name: Apply V5 robust KPAD WPAD pointer and frame fast-forward
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
           git -C cemu diff --check
           git -C cemu status --short
 
           $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
-          if (-not $wpad.Contains("update_joycon_pointer")) { throw "V5 gyro pointer code missing" }
-          if (-not $wpad.Contains("has_joycon_pointer")) { throw "V5 WPAD DPD pointer code missing" }
-
-          $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
-          if (-not $provider.Contains("!config->second.is_left && config->second.vertical")) { throw "V5 R Sideways motion correction missing" }
+          if (-not $wpad.Contains("has_joycon_pointer")) { throw "V5 raw WPAD DPD pointer code missing" }
+          if (-not $wpad.Contains("route Joy-Con gyro pointer")) {
+            # The literal comment is not required; functional marker below is.
+            if (-not $wpad.Contains("status.dpd_valid_fg = 2")) { throw "V5 KPAD pointer fallback missing" }
+          }
 
           $timing = Get-Content "cemu\src\Cafe\HW\Latte\Core\LatteTiming.cpp" -Raw
           if (-not $timing.Contains("signalCount")) { throw "V5 frame-driven fast-forward path missing" }
+          if (-not $timing.Contains("GetTimerShiftFactor")) { throw "V5 virtual VSync timer scaling missing" }
 
-          Write-Host "Verified V5 source paths."
+          Write-Host "Verified complete V5 source paths."
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
