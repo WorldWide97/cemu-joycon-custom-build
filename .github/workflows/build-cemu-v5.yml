@@ -80,6 +80,10 @@ jobs:
             Write-Host "V5 Stage 1 reached the known legacy KPAD anchor; verified all preceding V5 changes. Continuing with robust Stage 2."
           }
 
+          # GitHub's pwsh wrapper propagates the last native-process exit code.
+          # The Stage 1 failure above is expected and fully verified, so clear it.
+          $global:LASTEXITCODE = 0
+
       - name: Apply V5 robust KPAD WPAD pointer and frame fast-forward
         shell: pwsh
         run: |
@@ -89,10 +93,7 @@ jobs:
 
           $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
           if (-not $wpad.Contains("has_joycon_pointer")) { throw "V5 raw WPAD DPD pointer code missing" }
-          if (-not $wpad.Contains("route Joy-Con gyro pointer")) {
-            # The literal comment is not required; functional marker below is.
-            if (-not $wpad.Contains("status.dpd_valid_fg = 2")) { throw "V5 KPAD pointer fallback missing" }
-          }
+          if (-not $wpad.Contains("status.dpd_valid_fg = 2")) { throw "V5 KPAD pointer fallback missing" }
 
           $timing = Get-Content "cemu\src\Cafe\HW\Latte\Core\LatteTiming.cpp" -Raw
           if (-not $timing.Contains("signalCount")) { throw "V5 frame-driven fast-forward path missing" }
