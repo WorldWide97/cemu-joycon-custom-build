@@ -1,0 +1,50 @@
+name: Diagnose V5 Joy-Con Input
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout wrapper
+        uses: actions/checkout@v6
+        with:
+          path: wrapper
+      - name: Checkout pinned Cemu
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+          path: cemu
+          submodules: false
+          fetch-depth: 1
+      - name: Apply V2-V5
+        shell: bash
+        run: |
+          python wrapper/tools/apply_cemu_sideways.py cemu
+          python wrapper/tools/apply_cemu_v3_detection_fix.py cemu
+          python wrapper/tools/apply_cemu_v4_motion_osd.py cemu
+          set +e
+          python wrapper/tools/apply_cemu_v5_pointer_orientation_fastforward.py cemu
+          set -e
+          python wrapper/tools/apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+      - name: Dump exact transform code
+        shell: python
+        run: |
+          from pathlib import Path
+          def section(path, start, end):
+              t=Path(path).read_text(encoding='utf-8')
+              a=t.index(start)
+              b=t.index(end, a) if end else len(t)
+              print(f'===== {path}: {start} =====')
+              print(t[a:b])
+          section('cemu/src/input/api/SDL/SDLController.cpp', 'void SDLController::apply_vertical_transform', 'ControllerState SDLController::raw_state')
+          section('cemu/src/input/api/SDL/SDLController.cpp', 'ControllerState SDLController::raw_state', None)
+          section('cemu/src/input/api/SDL/SDLControllerProvider.cpp', 'float sensor_data[3]', 'if (event.gsensor.sensor == SDL_SENSOR_ACCEL)')
+          section('cemu/src/input/emulated/WPADController.cpp', 'bool WPADController::update_joycon_pointer', 'void WPADController::WPADRead')
