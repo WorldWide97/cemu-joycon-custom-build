@@ -1,0 +1,162 @@
+name: Build Cemu Joy-Con Orientation V7
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-cemu-v7.yml"
+      - "tools/apply_cemu_v7_pointer_gyro_toggle.py"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-cemu-v7.yml"
+      - "tools/apply_cemu_v7_pointer_gyro_toggle.py"
+      - "V7-CI-TRIGGER.txt"
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_ROOT: "${{ github.workspace }}/cemu/dependencies/vcpkg"
+  VCPKG_BINARY_SOURCES: clear
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+  CEMU_COMMIT: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v6
+        with:
+          path: wrapper
+
+      - name: Checkout pinned Cemu source
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+          path: cemu
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Apply V2 core
+        shell: pwsh
+        run: python wrapper\tools\apply_cemu_sideways.py cemu
+
+      - name: Apply V3 detection
+        shell: pwsh
+        run: python wrapper\tools\apply_cemu_v3_detection_fix.py cemu
+
+      - name: Apply V4 motion and OSD
+        shell: pwsh
+        run: python wrapper\tools\apply_cemu_v4_motion_osd.py cemu
+
+      - name: Apply V5 stage 1 verified prefix
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_pointer_orientation_fastforward.py cemu
+          $stage1Exit = $LASTEXITCODE
+          $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
+          $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
+          $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
+          if (-not $wpad.Contains("update_joycon_pointer")) { throw "V5 pointer core missing" }
+          if (-not $provider.Contains("!config->second.is_left && config->second.vertical")) { throw "V5 motion prefix missing" }
+          if (-not $panel.Contains("Internal Vertical == physical Sideways")) { throw "V5 UI mapping missing" }
+          if (-not $controller.Contains('orientation == JoyConOrientation::Vertical ? "Sideways" : "Vertical"')) { throw "V5 OSD mapping missing" }
+          if ($stage1Exit -ne 0) { Write-Host "Expected legacy KPAD anchor reached; continuing." }
+          $global:LASTEXITCODE = 0
+
+      - name: Apply V5 stage 2
+        shell: pwsh
+        run: python wrapper\tools\apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+
+      - name: Apply V6 physical coordinates
+        shell: pwsh
+        run: python wrapper\tools\apply_cemu_v6_input_coordinates_pointer.py cemu
+
+      - name: Apply V7 calibrated pointer and toggle
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v7_pointer_gyro_toggle.py cemu
+          git -C cemu diff --check
+          $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
+          $header = Get-Content "cemu\src\input\api\SDL\SDLController.h" -Raw
+          $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
+          if (-not $header.Contains("m_pointer_enabled")) { throw "V7 pointer enable state missing" }
+          if (-not $header.Contains("m_pointer_hotkey")) { throw "V7 pointer hotkey state missing" }
+          if (-not $controller.Contains("consume_hotkey(result.buttons, m_pointer_hotkey)")) { throw "V7 pointer chord consume missing" }
+          if (-not $wpad.Contains("const float dx = (-yaw_rate * dt) / kHorizontalFov")) { throw "V7 gyro X screen mapping missing" }
+          if (-not $wpad.Contains("const float dy = (-pitch_rate * dt) / kVerticalFov")) { throw "V7 gyro Y screen mapping missing" }
+          if (-not $wpad.Contains("33.0f * kPi / 180.0f")) { throw "V7 horizontal FOV missing" }
+          if (-not $wpad.Contains("23.0f * kPi / 180.0f")) { throw "V7 vertical FOV missing" }
+          if ($wpad.Contains("m_joycon_pointer_reference")) { throw "Old V6 fusion pointer survived" }
+          if (-not $panel.Contains("Pointer enabled")) { throw "V7 pointer checkbox missing" }
+          if (-not $panel.Contains("Pointer hotkey: Not set")) { throw "V7 pointer hotkey UI missing" }
+          Write-Host "Verified V7 source invariants."
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Configure Cemu Release
+        shell: pwsh
+        run: cmake -S cemu -B cemu/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build Cemu Release
+        shell: pwsh
+        run: cmake --build cemu/build --config release
+
+      - name: Verify and package V7
+        shell: pwsh
+        run: |
+          $exe = "cemu\bin\Cemu_release.exe"
+          if (-not (Test-Path $exe)) { throw "Expected $exe was not produced" }
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($marker in @("Joy-Con L", "Joy-Con R", "Orientation:", "Sideways hotkey", "Vertical hotkey", "Pointer enabled", "Pointer hotkey", "Pointer ON", "Pointer OFF", "Fast-forward ON (4x)", "Fast-forward OFF (1x)")) {
+            if (-not $ascii.Contains($marker)) { throw "Custom V7 marker missing: $marker" }
+            Write-Host "Verified marker: $marker"
+          }
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe "package\Cemu.exe" -Force
+          @"
+          Cemu Joy-Con Orientation V7
+          ===========================
+          Upstream Cemu commit: $env:CEMU_COMMIT
+
+          V7 pointer rebuild:
+          - Pointer is gyro-rate based instead of Mahony yaw/pitch fusion position.
+          - SDL-standard Gyro X (pitch) and Gyro Y (yaw) map directly to screen Y/X.
+          - Physical calibration uses Wii IR-like 33 degree horizontal and 23 degree vertical FOV.
+          - Same screen-space mapping works in Vertical and Sideways because V6 normalizes the Joy-Con IMU basis first.
+          - Minimal continuous 0.012 rad/s deadzone; no position low-pass lag.
+          - Pointer defaults ON for compatibility, can be disabled per Joy-Con.
+          - Pointer ON/OFF state persists in controller profile.
+          - User-configurable 2+ button pointer toggle hotkey, consumed from game input.
+          - Enabling pointer recenters it automatically and shows OSD ON/OFF.
+          - V6 motion/control transforms and V5 Fast-forward retained.
+          "@ | Set-Content "package\README-JoyCon-Orientation-V7.txt" -Encoding utf8
+          $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
+          "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
+          $zip = "Cemu-JoyCon-Orientation-V7-Windows-x64.zip"
+          Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          if (-not (Test-Path $zip)) { throw "Final V7 ZIP was not produced" }
+          Write-Host "Cemu.exe SHA-256: $hash"
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v6
+        with:
+          name: Cemu-JoyCon-Orientation-V7-Windows-x64
+          path: Cemu-JoyCon-Orientation-V7-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
