@@ -1,0 +1,76 @@
+name: Validate Cemu Joy-Con V7 Source
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/validate-cemu-v7-source.yml"
+      - "tools/apply_cemu_v7_pointer_gyro_toggle.py"
+
+permissions:
+  contents: read
+
+env:
+  CEMU_COMMIT: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout wrapper
+        uses: actions/checkout@v6
+        with:
+          path: wrapper
+
+      - name: Checkout pinned Cemu
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+          path: cemu
+          submodules: false
+          fetch-depth: 1
+
+      - name: Apply V2 through V6
+        shell: bash
+        run: |
+          python wrapper/tools/apply_cemu_sideways.py cemu
+          python wrapper/tools/apply_cemu_v3_detection_fix.py cemu
+          python wrapper/tools/apply_cemu_v4_motion_osd.py cemu
+          set +e
+          python wrapper/tools/apply_cemu_v5_pointer_orientation_fastforward.py cemu
+          set -e
+          python wrapper/tools/apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+          python wrapper/tools/apply_cemu_v6_input_coordinates_pointer.py cemu
+
+      - name: Apply and verify V7
+        shell: bash
+        run: |
+          python wrapper/tools/apply_cemu_v7_pointer_gyro_toggle.py cemu
+          git -C cemu diff --check
+          python - <<'PY'
+          from pathlib import Path
+          c = Path('cemu/src/input/api/SDL/SDLController.cpp').read_text()
+          h = Path('cemu/src/input/api/SDL/SDLController.h').read_text()
+          w = Path('cemu/src/input/emulated/WPADController.cpp').read_text()
+          p = Path('cemu/src/gui/wxgui/input/panels/WiimoteInputPanel.cpp').read_text()
+          checks = {
+              'pointer enable state': 'm_pointer_enabled' in h,
+              'pointer hotkey state': 'm_pointer_hotkey' in h,
+              'pointer toggle OSD': 'Pointer {}' in c,
+              'pointer chord consumed': 'consume_hotkey(result.buttons, m_pointer_hotkey)' in c,
+              'gyro pointer X': 'const float dx = (-yaw_rate * dt) / kHorizontalFov' in w,
+              'gyro pointer Y': 'const float dy = (-pitch_rate * dt) / kVerticalFov' in w,
+              'Wii IR horizontal FOV': '33.0f * kPi / 180.0f' in w,
+              'Wii IR vertical FOV': '23.0f * kPi / 180.0f' in w,
+              'fusion pointer removed': 'm_joycon_pointer_reference' not in w,
+              'pointer checkbox': 'Pointer enabled' in p,
+              'pointer hotkey UI': 'Pointer hotkey: Not set' in p,
+          }
+          for name, ok in checks.items():
+              print(('PASS' if ok else 'FAIL'), name)
+          if not all(checks.values()):
+              raise SystemExit(1)
+          PY
