@@ -1,0 +1,1 @@
+Trigger Cemu Joy-Con V6 Windows validation build.
