@@ -27,7 +27,7 @@ env:
 
 jobs:
   build-windows-x64:
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 120
 
     steps:
@@ -112,7 +112,7 @@ jobs:
 
       - name: Configure Cemu Release
         shell: pwsh
-        run: cmake -S cemu -B cemu/build -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+        run: cmake -S cemu -B cemu/build -G "Visual Studio 17 2022" -A x64 -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
 
       - name: Build Cemu Release
         shell: pwsh
