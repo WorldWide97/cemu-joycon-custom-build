@@ -7,6 +7,12 @@ on:
     paths:
       - ".github/workflows/validate-cemu-v7-source.yml"
       - "tools/apply_cemu_v7_pointer_gyro_toggle.py"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/validate-cemu-v7-source.yml"
+      - "tools/apply_cemu_v7_pointer_gyro_toggle.py"
+      - "V7-CI-TRIGGER.txt"
 
 permissions:
   contents: read
