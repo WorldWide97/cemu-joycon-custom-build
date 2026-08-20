@@ -1,17 +1,7 @@
-name: Build Cemu Joy-Con Orientation V5
+name: Build Cemu Joy-Con Orientation V6
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/build-cemu-v5.yml"
-      - "tools/apply_cemu_sideways.py"
-      - "tools/apply_cemu_v3_detection_fix.py"
-      - "tools/apply_cemu_v4_motion_osd.py"
-      - "tools/apply_cemu_v5_pointer_orientation_fastforward.py"
-      - "tools/apply_cemu_v5_stage2_pointer_kpad_fastforward.py"
   pull_request:
     branches:
       - main
@@ -63,43 +53,46 @@ jobs:
           python wrapper\tools\apply_cemu_v5_pointer_orientation_fastforward.py cemu
           $stage1Exit = $LASTEXITCODE
 
-          # Stage 1 currently stops at the old full-block KPAD anchor after all
-          # orientation/motion/pointer-core changes are already applied. Verify
-          # those exact changes before allowing the robust Stage 2 to continue.
           $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
           $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
           $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
           $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
 
           if (-not $wpad.Contains("update_joycon_pointer")) { throw "V5 pointer core was not applied" }
-          if (-not $provider.Contains("!config->second.is_left && config->second.vertical")) { throw "V5 R Sideways motion correction missing" }
-          if (-not $panel.Contains("Internal Vertical == physical Sideways")) { throw "V5 physical orientation UI mapping missing" }
-          if (-not $controller.Contains('orientation == JoyConOrientation::Vertical ? "Sideways" : "Vertical"')) { throw "V5 orientation OSD mapping missing" }
+          if (-not $provider.Contains("!config->second.is_left && config->second.vertical")) { throw "V5 intermediate motion correction missing" }
+          if (-not $panel.Contains("Internal Vertical == physical Sideways")) { throw "V5 intermediate UI mapping missing" }
+          if (-not $controller.Contains('orientation == JoyConOrientation::Vertical ? "Sideways" : "Vertical"')) { throw "V5 intermediate OSD mapping missing" }
 
           if ($stage1Exit -ne 0) {
-            Write-Host "V5 Stage 1 reached the known legacy KPAD anchor; verified all preceding V5 changes. Continuing with robust Stage 2."
+            Write-Host "V5 Stage 1 reached its known legacy KPAD anchor; continuing with Stage 2."
           }
-
-          # GitHub's pwsh wrapper propagates the last native-process exit code.
-          # The Stage 1 failure above is expected and fully verified, so clear it.
           $global:LASTEXITCODE = 0
 
       - name: Apply V5 robust KPAD WPAD pointer and frame fast-forward
         shell: pwsh
+        run: python wrapper\tools\apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+
+      - name: Apply V6 sideways semantics motion and precision pointer fix
+        shell: pwsh
         run: |
-          python wrapper\tools\apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+          python wrapper\tools\apply_cemu_v6_sideways_pointer_fix.py cemu
           git -C cemu diff --check
           git -C cemu status --short
 
+          $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
+          $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
+          $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
           $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
-          if (-not $wpad.Contains("has_joycon_pointer")) { throw "V5 raw WPAD DPD pointer code missing" }
-          if (-not $wpad.Contains("status.dpd_valid_fg = 2")) { throw "V5 KPAD pointer fallback missing" }
 
-          $timing = Get-Content "cemu\src\Cafe\HW\Latte\Core\LatteTiming.cpp" -Raw
-          if (-not $timing.Contains("signalCount")) { throw "V5 frame-driven fast-forward path missing" }
-          if (-not $timing.Contains("GetTimerShiftFactor")) { throw "V5 virtual VSync timer scaling missing" }
+          if (-not $controller.Contains("SDL mini-gamepad mode is already the physical Sideways layout")) { throw "V6 direct Sideways semantics missing" }
+          if (-not $controller.Contains('orientation == JoyConOrientation::Vertical ? "Vertical" : "Sideways"')) { throw "V6 OSD orientation semantics missing" }
+          if (-not $provider.Contains("!config->second.is_left && !config->second.vertical")) { throw "V6 R Sideways motion sign correction missing" }
+          if ($panel.Contains("Internal Vertical == physical Sideways")) { throw "Old inverted V5 UI semantics still present" }
+          if (-not $wpad.Contains("m_joycon_pointer_filtered_gyro")) { throw "V6 filtered gyro pointer missing" }
+          if (-not $wpad.Contains("kHorizontalGain = 4.6f")) { throw "V6 pointer gain missing" }
+          if (-not $wpad.Contains("getVPADGyroChange")) { throw "V6 gyro-rate pointer path missing" }
 
-          Write-Host "Verified complete V5 source paths."
+          Write-Host "Verified complete V6 source paths."
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -118,7 +111,7 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Verify and package V5
+      - name: Verify and package V6
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
@@ -127,7 +120,7 @@ jobs:
           $bytes = [System.IO.File]::ReadAllBytes($exe)
           $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
           foreach ($marker in @("Joy-Con L", "Joy-Con R", "Orientation:", "Sideways hotkey", "Vertical hotkey", "Fast-forward ON (4x)", "Fast-forward OFF (1x)")) {
-            if (-not $ascii.Contains($marker)) { throw "Custom V5 marker missing from Cemu.exe: $marker" }
+            if (-not $ascii.Contains($marker)) { throw "Custom V6 marker missing from Cemu.exe: $marker" }
             Write-Host "Verified marker: $marker"
           }
 
@@ -135,25 +128,23 @@ jobs:
           Copy-Item $exe "package\Cemu.exe" -Force
 
           @"
-          Cemu Joy-Con Orientation V5
+          Cemu Joy-Con Orientation V6
           ===========================
           Upstream Cemu commit: $env:CEMU_COMMIT
 
-          V5:
-          - Correct physical Vertical / Sideways labels and hotkeys.
-          - No new stick changes.
-          - Correct Joy-Con L Vertical and Joy-Con R Sideways horizontal motion sign.
-          - Wii Remote-only Joy-Con gyro pointer for KPAD and raw WPAD DPD/IR paths.
-          - Pointer starts centered and recenters after orientation/fusion discontinuities.
-          - Fast-forward remains Toggle 1x <-> 4x.
-          - Latte/GX2 virtual VSync follows TimerShiftFactor for frame-driven games.
-          - Orientation and Fast-forward OSD notifications retained.
-          "@ | Set-Content "package\README-JoyCon-Orientation-V5.txt" -Encoding utf8
+          V6 corrections:
+          - Sideways now uses SDL3 Joy-Con mini-gamepad mapping directly; no extra stick/button rotation.
+          - Vertical alone uses the explicit Cemu 90-degree transform.
+          - Physical Joy-Con L Vertical and Joy-Con R Sideways horizontal motion sign correction restored.
+          - Fast-forward V5 behavior retained unchanged.
+          - Wii Remote Joy-Con pointer now integrates filtered gyro rate using real frame time instead of differentiating fused Euler orientation.
+          - Pointer dead-zone and low-pass filtering added to reduce jitter and fusion jumps.
+          "@ | Set-Content "package\README-JoyCon-Orientation-V6.txt" -Encoding utf8
 
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
 
-          $zip = "Cemu-JoyCon-Orientation-V5-Windows-x64.zip"
+          $zip = "Cemu-JoyCon-Orientation-V6-Windows-x64.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal
           if (-not (Test-Path $zip)) { throw "Final ZIP was not produced" }
@@ -162,7 +153,7 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-JoyCon-Orientation-V5-Windows-x64
-          path: Cemu-JoyCon-Orientation-V5-Windows-x64.zip
+          name: Cemu-JoyCon-Orientation-V6-Windows-x64
+          path: Cemu-JoyCon-Orientation-V6-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
