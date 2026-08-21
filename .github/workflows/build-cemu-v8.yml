@@ -8,12 +8,14 @@ on:
       - ".github/workflows/build-cemu-v8.yml"
       - "tools/apply_cemu_v8_motion_pointer_calibration.py"
       - "tools/apply_cemu_v8_postfix.py"
+      - "tools/apply_cemu_resizable_input_settings.py"
   pull_request:
     branches: [main]
     paths:
       - ".github/workflows/build-cemu-v8.yml"
       - "tools/apply_cemu_v8_motion_pointer_calibration.py"
       - "tools/apply_cemu_v8_postfix.py"
+      - "tools/apply_cemu_resizable_input_settings.py"
       - "V8-BUILD-TRIGGER.txt"
 
 permissions:
@@ -68,17 +70,19 @@ jobs:
           python wrapper\tools\apply_cemu_v6_input_coordinates_pointer.py cemu
           python wrapper\tools\apply_cemu_v7_pointer_gyro_toggle.py cemu
 
-      - name: Apply V8 3D pointer and per-Joy-Con motion calibration
+      - name: Apply V8 3D pointer calibration and resizable Input Settings
         shell: pwsh
         run: |
           python wrapper\tools\apply_cemu_v8_motion_pointer_calibration.py cemu
           python wrapper\tools\apply_cemu_v8_postfix.py cemu
+          python wrapper\tools\apply_cemu_resizable_input_settings.py cemu
           git -C cemu diff --check
           $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
           $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
           $header = Get-Content "cemu\src\input\api\SDL\SDLController.h" -Raw
           $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
           $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
+          $inputSettings = Get-Content "cemu\src\gui\wxgui\input\InputSettings2.cpp" -Raw
           if (-not $provider.Contains("!config->second.vertical && !config->second.is_left")) { throw "V8 R Sideways normalization missing" }
           if (-not $provider.Contains("Preserve V8 per-device motion calibration")) { throw "V8 calibration preservation missing" }
           if (-not $controller.Contains("getVPADAttitudeMatrix(attitude)")) { throw "V8 3D attitude pointer missing" }
@@ -87,7 +91,10 @@ jobs:
           foreach ($marker in @("Recenter pointer", "Motion calibration:", "Yaw °", "Pitch °", "Deadzone °", "Reset motion")) {
             if (-not $panel.Contains($marker)) { throw "V8 UI marker missing: $marker" }
           }
-          Write-Host "Verified V8 source invariants."
+          foreach ($marker in @("wxRESIZE_BORDER", "wxMAXIMIZE_BOX", "wxScrolledWindow", "SetScrollRate(0, 12)", "AddGrowableRow(7, 1)")) {
+            if (-not $inputSettings.Contains($marker)) { throw "Resizable Input Settings marker missing: $marker" }
+          }
+          Write-Host "Verified V8 source invariants and resizable Input Settings."
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -133,6 +140,7 @@ jobs:
           - Live pointer crosshair plus Gyro/Accel/Pointer readout in Wii Remote Input settings.
           - R Sideways IMU X/Z normalization based on SDL's actual Joy-Con mini-gamepad sensor transform.
           - Per-Joy-Con motion X/Y/Z gain and inversion settings with reset button, saved in profile.
+          - Input Settings window is resizable/maximizable and every controller tab has vertical scrolling.
           - Existing Vertical/Sideways orientation hotkeys, V6 control mapping, and Fast Forward retained.
           "@ | Set-Content "package\README-JoyCon-Orientation-V8.txt" -Encoding utf8
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
