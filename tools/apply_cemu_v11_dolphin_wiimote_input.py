@@ -236,7 +236,7 @@ void WiimoteInputPanel::on_joycon_motion_dialog(wxCommandEvent&)
 		spin->SetDigits(2);
 		spin->SetValue(std::abs(value));
 		grid->Add(spin, 0, wxEXPAND);
-		invert = new wxCheckBox(&dialog, wxID_ANY);
+		invert = new wxCheckBox(&dialog, wxID_ANY, wxEmptyString);
 		invert->SetValue(value < 0.0f);
 		grid->Add(invert, 0, wxALIGN_CENTER);
 		grid->Add(new wxStaticText(&dialog, wxID_ANY, direction), 0, wxALIGN_CENTER_VERTICAL);
