@@ -1,0 +1,51 @@
+name: Validate Cemu Input Settings Resize
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tools/apply_cemu_resizable_input_settings.py"
+      - ".github/workflows/validate-input-resize.yml"
+      - "RESIZE-VALIDATE-TRIGGER.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout wrapper
+        uses: actions/checkout@v6
+        with:
+          path: wrapper
+
+      - name: Checkout pinned Cemu source
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+          path: cemu
+          submodules: false
+          fetch-depth: 1
+
+      - name: Apply and verify resize patch
+        shell: bash
+        run: |
+          python wrapper/tools/apply_cemu_resizable_input_settings.py cemu
+          git -C cemu diff --check
+          python - <<'PY'
+          from pathlib import Path
+          t = Path('cemu/src/gui/wxgui/input/InputSettings2.cpp').read_text(encoding='utf-8')
+          markers = [
+              'wxRESIZE_BORDER', 'wxMAXIMIZE_BOX', 'wxScrolledWindow',
+              'SetScrollRate(0, 12)', 'AddGrowableRow(7, 1)',
+              'FitInside()', 'SetMinSize(wxSize(700, 500))',
+              'SetSize(wxSize(1000, 720))'
+          ]
+          for marker in markers:
+              assert marker in t, f'missing marker: {marker}'
+          assert t.count('panel_sizer->Add(panel, 1, wxEXPAND);') == 2
+          assert 'panel_sizer->Add(panel, 0, wxEXPAND);' not in t
+          print('Resizable Input Settings source validation passed.')
+          PY
