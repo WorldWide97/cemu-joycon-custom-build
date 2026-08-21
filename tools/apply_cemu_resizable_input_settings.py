@@ -18,6 +18,15 @@ def replace_once(old: str, new: str, label: str):
     print(f"Patched InputSettings2.cpp: {label}")
 
 
+def replace_all(old: str, new: str, expected: int, label: str):
+    global text
+    count = text.count(old)
+    if count != expected:
+        raise RuntimeError(f"{label}: expected {expected} matches, found {count}")
+    text = text.replace(old, new)
+    print(f"Patched InputSettings2.cpp: {label} ({count} matches)")
+
+
 replace_once(
     '#include <wx/settings.h>\n',
     '#include <wx/settings.h>\n#include <wx/scrolwin.h>\n',
@@ -36,10 +45,12 @@ replace_once(
     'make every controller tab vertically scrollable',
 )
 
-replace_once(
-    '\tpanel_sizer->Add(panel, 0, wxEXPAND);\n',
-    '\tpanel_sizer->Add(panel, 1, wxEXPAND);\n',
-    'allow initial input panel to expand with the dialog',
+# There are two panel insertions: the initial sizing panel and the dynamically created active panel.
+replace_all(
+    '\t\tpanel_sizer->Add(panel, 0, wxEXPAND);\n',
+    '\t\tpanel_sizer->Add(panel, 1, wxEXPAND);\n',
+    2,
+    'allow input panels to expand with the dialog',
 )
 
 replace_once(
@@ -51,15 +62,20 @@ replace_once(
 replace_once(
     '\tpage->SetSizer(sizer);\n\tpage->Layout();\n\n\tpage->SetClientObject(new wxCustomData(page_data));\n',
     '\tpage->SetSizer(sizer);\n\tpage->Layout();\n\tif (auto* scrolled = dynamic_cast<wxScrolledWindow*>(page))\n\t\tscrolled->FitInside();\n\n\tpage->SetClientObject(new wxCustomData(page_data));\n',
-    'update scrollable virtual size after page layout',
+    'update scrollable virtual size after page initialization',
 )
 
-# Keep a practical minimum, while still allowing the user to freely enlarge/maximize.
+replace_once(
+    '\t\tpanel->Show();\n\t\tpage->wxWindowBase::Layout();\n\t\tpage->wxWindow::Update();\n',
+    '\t\tpanel->Show();\n\t\tpage->wxWindowBase::Layout();\n\t\tif (auto* scrolled = dynamic_cast<wxScrolledWindow*>(page))\n\t\t\tscrolled->FitInside();\n\t\tpage->wxWindow::Update();\n',
+    'refresh scrollable virtual size when active input panel changes',
+)
+
 replace_once(
     '\tFit();\n\n    panel->Hide();\n',
-    '\tFit();\n\tSetMinSize(wxSize(700, 500));\n\n    panel->Hide();\n',
-    'set practical minimum dialog size',
+    '\tFit();\n\tSetMinSize(wxSize(700, 500));\n\tSetSize(wxSize(1000, 720));\n\n    panel->Hide();\n',
+    'set practical initial and minimum dialog size',
 )
 
 cpp.write_text(text, encoding="utf-8")
-print("Resizable + scrollable Input Settings patch applied successfully.")
+print("Resizable + maximizable + scrollable Input Settings patch applied successfully.")
