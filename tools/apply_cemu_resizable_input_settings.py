@@ -45,10 +45,10 @@ replace_once(
     'make every controller tab vertically scrollable',
 )
 
-# There are two panel insertions: the initial sizing panel and the dynamically created active panel.
+# This exact statement occurs twice with different indentation levels.
 replace_all(
-    '\t\tpanel_sizer->Add(panel, 0, wxEXPAND);\n',
-    '\t\tpanel_sizer->Add(panel, 1, wxEXPAND);\n',
+    'panel_sizer->Add(panel, 0, wxEXPAND);',
+    'panel_sizer->Add(panel, 1, wxEXPAND);',
     2,
     'allow input panels to expand with the dialog',
 )
