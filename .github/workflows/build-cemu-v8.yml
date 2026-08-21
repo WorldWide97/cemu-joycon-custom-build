@@ -81,7 +81,8 @@ jobs:
           if ($provider.Contains("!config->second.vertical && !config->second.is_left")) { throw "V8 R Sideways double-transform still present" }
           if (-not $provider.Contains("V9 precision basis")) { throw "V9 common SDL motion basis missing" }
           if (-not $provider.Contains("motion_scale_x < 0.0f")) { throw "V9 physical IMU magnitude guard missing" }
-          if (-not $controller.Contains("current_forward = attitude + 3")) { throw "3D pointing ray missing" }
+          if (-not $controller.Contains("current_forward = attitude + 6")) { throw "V9 true Z-axis 3D pointing ray missing" }
+          if (-not $controller.Contains("reference_up = m_joycon_pointer_reference_attitude.data() + 3")) { throw "V9 pointer up basis missing" }
           if (-not $controller.Contains("screen_horizontal = horizontal_angle")) { throw "V9 pointer horizontal direction missing" }
           if (-not $controller.Contains("screen_vertical = -vertical_angle")) { throw "V9 pointer vertical direction missing" }
           if (-not $header.Contains("m_pointer_smoothing{ 0.0f }")) { throw "V9 direct pointer default missing" }
@@ -90,7 +91,7 @@ jobs:
           foreach ($marker in @("wxRESIZE_BORDER", "wxMAXIMIZE_BOX", "wxScrolledWindow", "SetScrollRate(0, 12)")) {
             if (-not $inputSettings.Contains($marker)) { throw "Resizable Input Settings marker missing: $marker" }
           }
-          Write-Host "Verified V9 pointer direction, 3D ray, L/R SDL basis, physical IMU magnitude, and resizable UI."
+          Write-Host "Verified V9 true 3D nose ray, pointer directions, L/R SDL motion basis, physical IMU magnitude, and resizable UI."
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -127,7 +128,8 @@ jobs:
           Upstream Cemu commit: $env:CEMU_COMMIT
 
           V9 changes over V8:
-          - Keeps V8 fused 3D attitude pointing ray; no flat Euler/rate integrator.
+          - Pointer uses Cemu's true VPAD Z top/nose vector as the fused 3D pointing ray.
+          - X is the recentered right basis and Y is the face/up basis, so hand aiming is tracked in full 3D.
           - Correct default pointer directions: physical right -> screen right, physical up -> screen up.
           - Direct pointer response by default (0 smoothing) with a tiny 0.05 degree deadzone.
           - Removes V8's extra Joy-Con R Sideways X/Z inversion; SDL already normalizes L/R mini-gamepad sensor orientation.
