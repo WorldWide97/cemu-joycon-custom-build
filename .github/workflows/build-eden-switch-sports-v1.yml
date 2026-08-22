@@ -7,6 +7,12 @@ on:
     paths:
       - '.github/workflows/build-eden-switch-sports-v1.yml'
       - 'patches/eden-switch-sports-v1.patch'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-eden-switch-sports-v1.yml'
+      - 'patches/eden-switch-sports-v1.patch'
   workflow_dispatch:
 
 permissions:
