@@ -1,0 +1,2 @@
+V22 CI trigger
+Actual Sideways/Vertical game-motion basis + final Joy-Con R accelerometer 180.
