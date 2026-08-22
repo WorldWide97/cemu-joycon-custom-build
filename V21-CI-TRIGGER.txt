@@ -1,0 +1,3 @@
+V21 motion-stack CI trigger
+Base: v16-stable-baseline
+Validates orientation UI fix, preserved V15 R accelerometer 180 correction, preserved V16 KPAD, independent game gyro calibration, and independent pointer auto-calibration.
