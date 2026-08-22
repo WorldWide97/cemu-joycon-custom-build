@@ -1,0 +1,128 @@
+# TEMPORARY CI harness for isolated Nintendo Switch Sports V2 compatibility testing.
+name: Build Eden Switch Sports V2
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-eden-switch-sports-v2.yml'
+      - 'patches/eden-switch-sports-v1.patch'
+      - 'patches/eden-switch-sports-v2-local-bindless.patch'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      - name: Checkout Eden v0.0.4-rc3
+        uses: actions/checkout@v4
+        with:
+          repository: eden-emulator/mirror
+          ref: v0.0.4-rc3
+          path: eden
+          fetch-depth: 1
+
+      - name: Apply Switch Sports V1 and V2 backports
+        shell: pwsh
+        run: |
+          Set-Location eden
+          git apply --check ../custom/patches/eden-switch-sports-v1.patch
+          git apply ../custom/patches/eden-switch-sports-v1.patch
+          git apply --check ../custom/patches/eden-switch-sports-v2-local-bindless.patch
+          git apply ../custom/patches/eden-switch-sports-v2-local-bindless.patch
+          git diff --check
+          Write-Host 'Applied V1 SSBO descriptor-size fix + V2 per-TexturePass bindless fallback isolation.'
+          git diff -- src/video_core/buffer_cache/buffer_cache.h src/shader_recompiler/ir_opt/texture_pass.cpp
+
+      - name: Enable MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Ensure Ninja is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+          cmake --version
+
+      - name: Install Vulkan SDK required by Eden
+        shell: pwsh
+        run: |
+          Set-Location eden
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/windows/install-vulkan-sdk.ps1
+
+      - name: Configure Eden
+        shell: pwsh
+        run: |
+          cmake -S eden -B eden/build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DENABLE_QT=ON `
+            -DENABLE_QT_TRANSLATION=ON `
+            -DENABLE_SDL2=ON `
+            -DYUZU_USE_BUNDLED_QT=ON `
+            -DYUZU_USE_BUNDLED_SDL2=ON `
+            -DYUZU_USE_BUNDLED_FFMPEG=ON `
+            -DYUZU_USE_CPM=ON `
+            -DENABLE_WEB_SERVICE=OFF `
+            -DUSE_DISCORD_PRESENCE=OFF `
+            -DBUILD_TESTING=OFF `
+            -DYUZU_TESTS=OFF `
+            -DDYNARMIC_TESTS=OFF `
+            -DYUZU_CMD=OFF `
+            -DYUZU_ROOM=OFF `
+            -DYUZU_ROOM_STANDALONE=OFF `
+            -DYUZU_USE_QT_MULTIMEDIA=OFF `
+            -DYUZU_USE_QT_WEB_ENGINE=OFF `
+            -DYUZU_ENABLE_LTO=OFF `
+            -DDYNARMIC_ENABLE_LTO=OFF `
+            -DENABLE_UPDATE_CHECKER=OFF
+
+      - name: Build Eden
+        shell: pwsh
+        run: cmake --build eden/build --parallel 4
+
+      - name: Package Windows x64 V2 test build
+        shell: pwsh
+        run: |
+          $bin = Join-Path $PWD 'eden/build/bin'
+          if (-not (Test-Path (Join-Path $bin 'eden.exe'))) {
+            throw 'eden.exe was not produced.'
+          }
+          $dist = Join-Path $PWD 'dist/Eden-Switch-Sports-V2-Windows-x64'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "$bin/*" $dist -Recurse -Force
+          Copy-Item 'eden/LICENSE*' $dist -Force -ErrorAction SilentlyContinue
+          Copy-Item 'eden/README*' $dist -Force -ErrorAction SilentlyContinue
+          @'
+          Eden Switch Sports V2 test build
+          Base: Eden v0.0.4-rc3
+          V1: data-driven NVN SSBO descriptor size detection (Eden #4041 lineage).
+          V2: remove process-global last_valid_addr bindless fallback and scope fallback to one TexturePass only.
+          Diagnostic behavior: if the first untracked bindless descriptor has no same-pass fallback, throw a clear NotImplementedException rather than reusing cross-shader state.
+          Evidence: user log ended immediately after three Unmapped Device ReadBlock errors during a burst of Vulkan graphics-pipeline creation.
+          '@ | Set-Content -Path (Join-Path $dist 'SWITCH-SPORTS-V2.txt') -Encoding UTF8
+          Compress-Archive -Path "$dist/*" -DestinationPath 'dist/Eden-Switch-Sports-V2-Windows-x64.zip' -Force
+          Get-FileHash 'dist/Eden-Switch-Sports-V2-Windows-x64.zip' -Algorithm SHA256 | Format-List
+
+      - name: Upload V2 test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eden-Switch-Sports-V2-Windows-x64
+          path: dist/Eden-Switch-Sports-V2-Windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
