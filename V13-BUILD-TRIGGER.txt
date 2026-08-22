@@ -1,0 +1,1 @@
+V13 exact Dolphin Motion Input build requested after real Joy-Con V12 testing.

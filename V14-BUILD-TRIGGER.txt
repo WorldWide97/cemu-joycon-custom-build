@@ -1,0 +1,1 @@
+V14 restores the proven V9 Cemu game-motion basis while preserving the independent Dolphin pointer and removes the redundant external Pointer button.
