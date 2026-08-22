@@ -1,0 +1,1 @@
+V15 applies the hardware-verified Joy-Con R Sideways X/Z correction and emits a normalized KPAD down vector for Mario Kart wheel steering.

@@ -1,0 +1,1 @@
+V19 scope: start from V16 and change only game gyro axis mapping for standalone Joy-Con L/R. Preserve V16 accelerometer, KPAD/down, pointer, UI, and all other behavior.

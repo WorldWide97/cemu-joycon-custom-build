@@ -1,0 +1,1 @@
+V19 fixes only the Joy-Con game gyroscope mapping on top of V16; accelerometer, KPAD, pointer, UI, and V16 behavior remain unchanged.

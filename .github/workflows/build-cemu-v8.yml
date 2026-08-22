@@ -1,22 +1,13 @@
-name: Build Cemu Joy-Con Orientation V8
+name: Build Cemu Joy-Con Precision V9
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/build-cemu-v8.yml"
-      - "tools/apply_cemu_v8_motion_pointer_calibration.py"
-      - "tools/apply_cemu_v8_postfix.py"
-      - "tools/apply_cemu_resizable_input_settings.py"
   pull_request:
     branches: [main]
     paths:
       - ".github/workflows/build-cemu-v8.yml"
-      - "tools/apply_cemu_v8_motion_pointer_calibration.py"
-      - "tools/apply_cemu_v8_postfix.py"
-      - "tools/apply_cemu_resizable_input_settings.py"
-      - "V8-BUILD-TRIGGER.txt"
+      - "tools/apply_cemu_v9_precision_motion_pointer.py"
+      - "V9-BUILD-TRIGGER.txt"
 
 permissions:
   contents: read
@@ -70,31 +61,37 @@ jobs:
           python wrapper\tools\apply_cemu_v6_input_coordinates_pointer.py cemu
           python wrapper\tools\apply_cemu_v7_pointer_gyro_toggle.py cemu
 
-      - name: Apply V8 3D pointer calibration and resizable Input Settings
+      - name: Apply V8 base and resizable Input Settings
         shell: pwsh
         run: |
           python wrapper\tools\apply_cemu_v8_motion_pointer_calibration.py cemu
           python wrapper\tools\apply_cemu_v8_postfix.py cemu
           python wrapper\tools\apply_cemu_resizable_input_settings.py cemu
+
+      - name: Apply V9 precision pointer and motion basis
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v9_precision_motion_pointer.py cemu
           git -C cemu diff --check
           $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
           $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
           $header = Get-Content "cemu\src\input\api\SDL\SDLController.h" -Raw
           $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
-          $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
           $inputSettings = Get-Content "cemu\src\gui\wxgui\input\InputSettings2.cpp" -Raw
-          if (-not $provider.Contains("!config->second.vertical && !config->second.is_left")) { throw "V8 R Sideways normalization missing" }
-          if (-not $provider.Contains("Preserve V8 per-device motion calibration")) { throw "V8 calibration preservation missing" }
-          if (-not $controller.Contains("getVPADAttitudeMatrix(attitude)")) { throw "V8 3D attitude pointer missing" }
-          if (-not $controller.Contains("current_forward = attitude + 3")) { throw "V8 pointing ray missing" }
-          if (-not $wpad.Contains("joycon->update_joycon_pointer(position, previous)")) { throw "V8 WPAD pointer delegation missing" }
-          foreach ($marker in @("Recenter pointer", "Motion calibration:", "Yaw °", "Pitch °", "Deadzone °", "Reset motion")) {
-            if (-not $panel.Contains($marker)) { throw "V8 UI marker missing: $marker" }
-          }
-          foreach ($marker in @("wxRESIZE_BORDER", "wxMAXIMIZE_BOX", "wxScrolledWindow", "SetScrollRate(0, 12)", "AddGrowableRow(7, 1)")) {
+          if ($provider.Contains("!config->second.vertical && !config->second.is_left")) { throw "V8 R Sideways double-transform still present" }
+          if (-not $provider.Contains("V9 precision basis")) { throw "V9 common SDL motion basis missing" }
+          if (-not $provider.Contains("motion_scale_x < 0.0f")) { throw "V9 physical IMU magnitude guard missing" }
+          if (-not $controller.Contains("current_forward = attitude + 6")) { throw "V9 true Z-axis 3D pointing ray missing" }
+          if (-not $controller.Contains("reference_up = m_joycon_pointer_reference_attitude.data() + 3")) { throw "V9 pointer up basis missing" }
+          if (-not $controller.Contains("screen_horizontal = horizontal_angle")) { throw "V9 pointer horizontal direction missing" }
+          if (-not $controller.Contains("screen_vertical = -vertical_angle")) { throw "V9 pointer vertical direction missing" }
+          if (-not $header.Contains("m_pointer_smoothing{ 0.0f }")) { throw "V9 direct pointer default missing" }
+          if (-not $header.Contains("m_pointer_deadzone_degrees{ 0.05f }")) { throw "V9 precision deadzone missing" }
+          if (-not $wpad.Contains("joycon->update_joycon_pointer(position, previous)")) { throw "WPAD pointer delegation missing" }
+          foreach ($marker in @("wxRESIZE_BORDER", "wxMAXIMIZE_BOX", "wxScrolledWindow", "SetScrollRate(0, 12)")) {
             if (-not $inputSettings.Contains($marker)) { throw "Resizable Input Settings marker missing: $marker" }
           }
-          Write-Host "Verified V8 source invariants and resizable Input Settings."
+          Write-Host "Verified V9 true 3D nose ray, pointer directions, L/R SDL motion basis, physical IMU magnitude, and resizable UI."
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -113,47 +110,45 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Verify and package V8
+      - name: Verify and package V9
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
           if (-not (Test-Path $exe)) { throw "Expected $exe was not produced" }
           $bytes = [System.IO.File]::ReadAllBytes($exe)
           $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
-          foreach ($marker in @("Joy-Con L", "Joy-Con R", "Orientation:", "Pointer enabled", "Pointer hotkey", "Recenter pointer", "Motion calibration:", "Reset motion", "Fast-forward ON (4x)")) {
-            if (-not $ascii.Contains($marker)) { throw "Custom V8 marker missing: $marker" }
-            Write-Host "Verified marker: $marker"
+          foreach ($marker in @("Joy-Con L", "Joy-Con R", "Orientation:", "Pointer enabled", "Recenter pointer", "Motion calibration:", "Fast-forward ON (4x)")) {
+            if (-not $ascii.Contains($marker)) { throw "Custom marker missing: $marker" }
           }
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item $exe "package\Cemu.exe" -Force
           @"
-          Cemu Joy-Con Orientation V8
-          ===========================
+          Cemu Joy-Con Precision V9
+          =========================
           Upstream Cemu commit: $env:CEMU_COMMIT
 
-          V8 hardware-calibration build:
-          - Pointer uses the fused 3D attitude/pointing ray instead of Euler deltas or gyro-rate position integration.
-          - Recenter stores the current controller aiming direction as screen center.
-          - Controller roll does not define cursor left/right; pointing direction does.
-          - Default pointer envelope follows Dolphin-style 25 degree yaw / 20 degree pitch and is user adjustable.
-          - Per-Joy-Con pointer: enable, 2+ button toggle hotkey, recenter, yaw, pitch, deadzone, smoothing, invert X/Y.
-          - Live pointer crosshair plus Gyro/Accel/Pointer readout in Wii Remote Input settings.
-          - R Sideways IMU X/Z normalization based on SDL's actual Joy-Con mini-gamepad sensor transform.
-          - Per-Joy-Con motion X/Y/Z gain and inversion settings with reset button, saved in profile.
-          - Input Settings window is resizable/maximizable and every controller tab has vertical scrolling.
-          - Existing Vertical/Sideways orientation hotkeys, V6 control mapping, and Fast Forward retained.
-          "@ | Set-Content "package\README-JoyCon-Orientation-V8.txt" -Encoding utf8
+          V9 changes over V8:
+          - Pointer uses Cemu's true VPAD Z top/nose vector as the fused 3D pointing ray.
+          - X is the recentered right basis and Y is the face/up basis, so hand aiming is tracked in full 3D.
+          - Correct default pointer directions: physical right -> screen right, physical up -> screen up.
+          - Direct pointer response by default (0 smoothing) with a tiny 0.05 degree deadzone.
+          - Removes V8's extra Joy-Con R Sideways X/Z inversion; SDL already normalizes L/R mini-gamepad sensor orientation.
+          - Preserves physical accelerometer/gyro magnitude 1:1; saved motion calibration can invert an axis but cannot distort 1 g / motion sensitivity.
+          - Intended to restore natural Wii Remote tilt steering response in Mario Kart for both Joy-Con L and R.
+          - Resizable/maximizable/scrollable Input Settings retained.
+          - V8 pointer controls, orientation hotkeys, and Fast Forward retained.
+          "@ | Set-Content "package\README-JoyCon-Precision-V9.txt" -Encoding utf8
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
-          $zip = "Cemu-JoyCon-Orientation-V8-Windows-x64.zip"
+          $zip = "Cemu-JoyCon-Precision-V9-Windows-x64.zip"
           Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal -Force
-          if (-not (Test-Path $zip)) { throw "Final V8 ZIP was not produced" }
+          if (-not (Test-Path $zip)) { throw "Final V9 ZIP was not produced" }
           Write-Host "Cemu.exe SHA-256: $hash"
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-JoyCon-Orientation-V8-Windows-x64
-          path: Cemu-JoyCon-Orientation-V8-Windows-x64.zip
+          name: Cemu-JoyCon-Precision-V9-Windows-x64
+          path: Cemu-JoyCon-Precision-V9-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30

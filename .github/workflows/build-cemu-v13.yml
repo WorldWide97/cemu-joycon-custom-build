@@ -1,0 +1,217 @@
+name: Build Cemu Joy-Con Exact Dolphin Motion Input V13
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v11-dolphin-wiimote-input]
+    paths:
+      - ".github/workflows/build-cemu-v13.yml"
+      - "tools/apply_cemu_v13_exact_dolphin_motion_input.py"
+      - "V13-BUILD-TRIGGER.txt"
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_ROOT: "${{ github.workspace }}/cemu/dependencies/vcpkg"
+  VCPKG_BINARY_SOURCES: clear
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+  CEMU_COMMIT: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+  DOLPHIN_REFERENCE_COMMIT: c77bbaa0f372c3f72281602a8b087206706542cb
+  DOLPHIN_JOYCON_FIX_COMMIT: fb80816da78ff221456b9c880bf093d60219ebbc
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v6
+        with:
+          path: wrapper
+
+      - name: Checkout pinned Cemu source
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+          path: cemu
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Apply V2 through V4
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_sideways.py cemu
+          python wrapper\tools\apply_cemu_v3_detection_fix.py cemu
+          python wrapper\tools\apply_cemu_v4_motion_osd.py cemu
+
+      - name: Apply V5 stage 1 verified prefix
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_pointer_orientation_fastforward.py cemu
+          $stage1Exit = $LASTEXITCODE
+          $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          if (-not $wpad.Contains("update_joycon_pointer")) { throw "V5 pointer core missing" }
+          if ($stage1Exit -ne 0) { Write-Host "Expected legacy KPAD anchor reached; continuing." }
+          $global:LASTEXITCODE = 0
+
+      - name: Apply V5 through V7
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+          python wrapper\tools\apply_cemu_v6_input_coordinates_pointer.py cemu
+          python wrapper\tools\apply_cemu_v7_pointer_gyro_toggle.py cemu
+
+      - name: Apply V8 UI and calibration base
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v8_motion_pointer_calibration.py cemu
+          python wrapper\tools\apply_cemu_v8_postfix.py cemu
+          python wrapper\tools\apply_cemu_resizable_input_settings.py cemu
+
+      - name: Apply V9 through V12
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v9_precision_motion_pointer.py cemu
+          python wrapper\tools\apply_cemu_v10_dolphin_motion_core.py cemu
+          python wrapper\tools\apply_cemu_v10_dolphin_postfix.py cemu
+          python wrapper\tools\apply_cemu_v11_dolphin_wiimote_input.py cemu
+          python wrapper\tools\apply_cemu_v12_dolphin_motion_visualizer.py cemu
+
+      - name: Apply and validate V13
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v13_exact_dolphin_motion_input.py cemu
+          git -C cemu diff --check
+
+          $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
+          $header = Get-Content "cemu\src\input\api\SDL\SDLController.h" -Raw
+          $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
+          $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
+          $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+
+          if ($provider.Contains("tracking.acc *= scale") -or $provider.Contains("tracking.gyro *= scale")) {
+            throw "V12 legacy scale distortion is still active"
+          }
+          foreach ($marker in @(
+            "Dolphin direct sensor semantics use calibrated raw units",
+            "set_joycon_dolphin_motion_settings",
+            "kDolphinMinCalibrationHz = 25.0",
+            "gyro_deadzone_degrees",
+            "calibration_period_seconds"
+          )) {
+            if (-not $provider.Contains($marker)) { throw "V13 motion marker missing: $marker" }
+          }
+          foreach ($marker in @(
+            "get_dolphin_total_yaw_degrees",
+            "get_dolphin_accel_influence",
+            "kDolphinHorizontalFov",
+            "m_dolphin_pointer_sensor_target",
+            "time_constant = 0.0025f + smoothing * 0.10f"
+          )) {
+            if (-not ($controller.Contains($marker) -or $header.Contains($marker))) { throw "V13 pointer marker missing: $marker" }
+          }
+          if ($wpad.Contains("std::abs(acc.x + acc.y)")) { throw "Unsigned KPAD down-vector bug returned" }
+          if (-not $wpad.Contains("status.accVertical.x = std::clamp(acc.x + acc.y, -1.0f, 1.0f)")) {
+            throw "Signed KPAD down-vector fix missing"
+          }
+          foreach ($marker in @(
+            "Motion Input - Dolphin Wii Remote",
+            "Point (Passthrough)",
+            "Total Yaw",
+            "Accelerometer Influence (%)",
+            "Horizontal FOV",
+            "Vertical FOV",
+            "Accel Up",
+            "Accel Backward",
+            "Gyro Pitch Up",
+            "Gyro Yaw Right",
+            "Dead Zone (degrees/s)",
+            "Calibration Period (s)",
+            "Yellow sensor | Blue deadzone | Green game output",
+            "READY / STILL"
+          )) {
+            if (-not $panel.Contains($marker)) { throw "V13 Dolphin UI marker missing: $marker" }
+          }
+          Write-Host "Verified V13 source: raw-unit Dolphin motion, exact Point/Accelerometer/Gyroscope organization, live views, settings, calibration, and preserved signed KPAD tilt."
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Configure Cemu Release
+        shell: pwsh
+        run: cmake -S cemu -B cemu/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build Cemu Release
+        shell: pwsh
+        run: cmake --build cemu/build --config release
+
+      - name: Verify and package V13
+        shell: pwsh
+        run: |
+          $exe = "cemu\bin\Cemu_release.exe"
+          if (-not (Test-Path $exe)) { throw "Expected $exe was not produced" }
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($marker in @(
+            "Joy-Con L",
+            "Joy-Con R",
+            "Pointer...",
+            "Motion Input...",
+            "Point (Passthrough)",
+            "Total Yaw",
+            "Accelerometer Influence (%)",
+            "Horizontal FOV",
+            "Calibration Period (s)",
+            "Dolphin-style input:",
+            "Fast-forward ON (4x)"
+          )) {
+            if (-not $ascii.Contains($marker)) { throw "Custom executable marker missing: $marker" }
+          }
+
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe "package\Cemu.exe" -Force
+          @"
+          Cemu Joy-Con Exact Dolphin Motion Input V13
+          ===========================================
+          Upstream Cemu: $env:CEMU_COMMIT
+          Dolphin motion reference: $env:DOLPHIN_REFERENCE_COMMIT (2606a)
+          User-tested Joy-Con R fix: $env:DOLPHIN_JOYCON_FIX_COMMIT
+
+          V13 changes over V12:
+          - Removes legacy per-axis scale amplification from Dolphin direct motion. Raw 1 g remains 1 g.
+          - Migrates legacy V8-V12 scale values to neutral 1.0 because they were inert before V12.
+          - Matches Dolphin Motion Input organization: Point, Point Passthrough, Accelerometer, Gyroscope.
+          - Adds a live pointer indicator inside Point plus live accelerometer and gyro indicators.
+          - Adds functional Total Yaw, Accelerometer Influence, Horizontal/Vertical FOV,
+            Gyro Dead Zone, and Calibration Period controls with Dolphin defaults.
+          - Keeps Dolphin pre-orientation pointer input and applies L -90 / R 180 only to game motion.
+          - Keeps 25 Hz stable-calibration restart and manual pointer recenter shortcut.
+          - Preserves V11 signed KPAD down vector and all V2-V12 features.
+
+          Recommended pointer start: Deadzone 0.35 degrees, Smooth 0.10.
+          Hardware motion behavior still requires real Joy-Con testing.
+          "@ | Set-Content "package\README-JoyCon-Dolphin-WiiRemote-V13.txt" -Encoding utf8
+
+          $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
+          "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
+          $zip = "Cemu-JoyCon-Dolphin-WiiRemote-V13-Windows-x64.zip"
+          Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          if (-not (Test-Path $zip)) { throw "Final V13 ZIP was not produced" }
+          Write-Host "Cemu.exe SHA-256: $hash"
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v6
+        with:
+          name: Cemu-JoyCon-Dolphin-WiiRemote-V13-Windows-x64
+          path: Cemu-JoyCon-Dolphin-WiiRemote-V13-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
