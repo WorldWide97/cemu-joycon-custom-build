@@ -1,0 +1,123 @@
+# CI base for isolated Nintendo Switch Sports compatibility testing. Not for main.
+name: Build Eden Switch Sports V1
+
+on:
+  pull_request:
+    branches:
+      - eden-switch-sports-ci-base
+    paths:
+      - '.github/workflows/build-eden-switch-sports-v1.yml'
+      - 'patches/eden-switch-sports-v1.patch'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      - name: Checkout Eden v0.0.4-rc3
+        uses: actions/checkout@v4
+        with:
+          repository: eden-emulator/mirror
+          ref: v0.0.4-rc3
+          path: eden
+          fetch-depth: 1
+
+      - name: Apply Switch Sports V1 backport
+        shell: pwsh
+        run: |
+          Set-Location eden
+          git apply --check ../custom/patches/eden-switch-sports-v1.patch
+          git apply ../custom/patches/eden-switch-sports-v1.patch
+          git diff --check
+          Write-Host 'Applied V1: data-driven NVN SSBO packed-size detection.'
+          git diff -- src/video_core/buffer_cache/buffer_cache.h
+
+      - name: Enable MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Ensure Ninja is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+          cmake --version
+
+      - name: Install Vulkan SDK required by Eden
+        shell: pwsh
+        run: |
+          Set-Location eden
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/windows/install-vulkan-sdk.ps1
+
+      - name: Configure Eden
+        shell: pwsh
+        run: |
+          cmake -S eden -B eden/build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DENABLE_QT=ON `
+            -DENABLE_QT_TRANSLATION=ON `
+            -DENABLE_SDL2=ON `
+            -DYUZU_USE_BUNDLED_QT=ON `
+            -DYUZU_USE_BUNDLED_SDL2=ON `
+            -DYUZU_USE_BUNDLED_FFMPEG=ON `
+            -DYUZU_USE_CPM=ON `
+            -DENABLE_WEB_SERVICE=OFF `
+            -DUSE_DISCORD_PRESENCE=OFF `
+            -DBUILD_TESTING=OFF `
+            -DYUZU_TESTS=OFF `
+            -DDYNARMIC_TESTS=OFF `
+            -DYUZU_CMD=OFF `
+            -DYUZU_ROOM=OFF `
+            -DYUZU_ROOM_STANDALONE=OFF `
+            -DYUZU_USE_QT_MULTIMEDIA=OFF `
+            -DYUZU_USE_QT_WEB_ENGINE=OFF `
+            -DYUZU_ENABLE_LTO=OFF `
+            -DDYNARMIC_ENABLE_LTO=OFF `
+            -DENABLE_UPDATE_CHECKER=OFF
+
+      - name: Build Eden
+        shell: pwsh
+        run: cmake --build eden/build --parallel 4
+
+      - name: Package Windows x64 test build
+        shell: pwsh
+        run: |
+          $bin = Join-Path $PWD 'eden/build/bin'
+          if (-not (Test-Path (Join-Path $bin 'eden.exe'))) {
+            throw 'eden.exe was not produced.'
+          }
+          $dist = Join-Path $PWD 'dist/Eden-Switch-Sports-V1-Windows-x64'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "$bin/*" $dist -Recurse -Force
+          Copy-Item 'eden/LICENSE*' $dist -Force -ErrorAction SilentlyContinue
+          Copy-Item 'eden/README*' $dist -Force -ErrorAction SilentlyContinue
+          @'
+          Eden Switch Sports V1 test build
+          Base: Eden v0.0.4-rc3
+          Patch: backport of data-driven NVN SSBO descriptor size detection inspired by Eden #4041 / commit 8e5419209c8994359eddaa2b85395dd7d756ff89.
+          Goal: test Nintendo Switch Sports Vulkan boot/render path without changing unrelated emulator behavior.
+          '@ | Set-Content -Path (Join-Path $dist 'SWITCH-SPORTS-V1.txt') -Encoding UTF8
+          Compress-Archive -Path "$dist/*" -DestinationPath 'dist/Eden-Switch-Sports-V1-Windows-x64.zip' -Force
+          Get-FileHash 'dist/Eden-Switch-Sports-V1-Windows-x64.zip' -Algorithm SHA256 | Format-List
+
+      - name: Upload V1 test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eden-Switch-Sports-V1-Windows-x64
+          path: dist/Eden-Switch-Sports-V1-Windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
