@@ -1,13 +1,14 @@
-name: Build Cemu Joy-Con R Sideways and Mario Kart Wheel V15
+name: Build Cemu Joy-Con V7 KPAD Motion V16
 
 on:
   workflow_dispatch:
   push:
     branches: [v11-dolphin-wiimote-input]
     paths:
-      - ".github/workflows/build-cemu-v15.yml"
+      - ".github/workflows/build-cemu-v16.yml"
       - "tools/apply_cemu_v15_r_sideways_kpad_wheel.py"
-      - "V15-BUILD-TRIGGER.txt"
+      - "tools/apply_cemu_v16_restore_v7_kpad_down.py"
+      - "V16-BUILD-TRIGGER.txt"
 
 permissions:
   contents: read
@@ -81,10 +82,11 @@ jobs:
           python wrapper\tools\apply_cemu_v13_exact_dolphin_motion_input.py cemu
           python wrapper\tools\apply_cemu_v14_v9_game_motion.py cemu
 
-      - name: Apply and validate V15
+      - name: Apply and validate V15 and V16
         shell: pwsh
         run: |
           python wrapper\tools\apply_cemu_v15_r_sideways_kpad_wheel.py cemu
+          python wrapper\tools\apply_cemu_v16_restore_v7_kpad_down.py cemu
           git -C cemu diff --check
 
           $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
@@ -104,21 +106,20 @@ jobs:
             "state.dolphin_pointer_acc = dolphin_acc",
             "state.dolphin_pointer_gyro = dolphin_gyro"
           )) {
-            if (-not $provider.Contains($marker)) { throw "V15 R Sideways marker missing: $marker" }
+            if (-not $provider.Contains($marker)) { throw "V16 R Sideways marker missing: $marker" }
           }
           if ($provider.Contains("state.handler.processDolphinMotionSample(tsDifD")) {
             throw "Dolphin pointer axes still feed Cemu game motion"
           }
           foreach ($marker in @(
-            "const float down_horizontal = std::sqrt(acc.x * acc.x + acc.y * acc.y)",
-            "const float down_length = std::sqrt(down_horizontal * down_horizontal + acc.z * acc.z)",
-            "status.accVertical.x = std::clamp(down_horizontal / down_length, 0.0f, 1.0f)",
-            "status.accVertical.y = std::clamp(-acc.z / down_length, -1.0f, 1.0f)"
+            "V16 restores the exact V7/upstream Cemu KPAD down contract",
+            "status.accVertical.x = std::min(1.0f, std::abs(acc.x + acc.y))",
+            "status.accVertical.y = std::min(std::max(-1.0f, -acc.z), 1.0f)"
           )) {
-            if (-not $wpad.Contains($marker)) { throw "V15 normalized KPAD down marker missing: $marker" }
+            if (-not $wpad.Contains($marker)) { throw "V16 exact V7 KPAD down marker missing: $marker" }
           }
-          if ($wpad.Contains("std::abs(acc.x + acc.y)") -or $wpad.Contains("std::clamp(acc.x + acc.y")) {
-            throw "Legacy malformed KPAD down calculation remains"
+          if ($wpad.Contains("const float down_horizontal") -or $wpad.Contains("std::clamp(acc.x + acc.y")) {
+            throw "V11/V15 experimental KPAD down calculation remains"
           }
           foreach ($marker in @(
             "get_dolphin_total_yaw_degrees",
@@ -126,7 +127,7 @@ jobs:
             "m_dolphin_pointer_sensor_target",
             "time_constant = 0.0025f + smoothing * 0.10f"
           )) {
-            if (-not ($controller.Contains($marker) -or $header.Contains($marker))) { throw "V15 pointer marker missing: $marker" }
+            if (-not ($controller.Contains($marker) -or $header.Contains($marker))) { throw "V16 pointer marker missing: $marker" }
           }
           if ($panel.Contains('_("Pointer...")') -or $panelHeader.Contains("m_joycon_pointer_dialog")) {
             throw "External Pointer button returned"
@@ -140,9 +141,9 @@ jobs:
             "Dead Zone (degrees/s)",
             "Calibration Period (s)"
           )) {
-            if (-not $panel.Contains($marker)) { throw "V15 UI marker missing: $marker" }
+            if (-not $panel.Contains($marker)) { throw "V16 UI marker missing: $marker" }
           }
-          Write-Host "Verified V15 source: hardware-tested R Sideways X/Z correction, normalized KPAD wheel vector, independent Dolphin pointer, and unified UI."
+          Write-Host "Verified V16 source: hardware-tested R Sideways X/Z correction, exact V7 KPAD down contract, independent Dolphin pointer, and unified UI."
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -161,7 +162,7 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Verify and package V15
+      - name: Verify and package V16
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
@@ -187,35 +188,36 @@ jobs:
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item $exe "package\Cemu.exe" -Force
           @"
-          Cemu Joy-Con R Sideways and Mario Kart Wheel V15
-          =================================================
+          Cemu Joy-Con V7 KPAD Motion V16
+          ===============================
           Upstream Cemu: $env:CEMU_COMMIT
           Dolphin pointer reference: $env:DOLPHIN_REFERENCE_COMMIT (2606a)
           User-tested Dolphin Joy-Con fix reference: $env:DOLPHIN_JOYCON_FIX_COMMIT
 
-          V15 changes over V14:
+          V16 changes over V15:
+          - Restores the exact V7/upstream Cemu KPAD down pair used by the last known-good Mario Kart motion builds.
+          - down.x is the original non-negative abs(acc.x + acc.y) magnitude; down.y remains signed -acc.z roll.
+          - Removes V15's experimental normalized-radial KPAD calculation.
           - Applies a hardware-verified 180-degree X/Z correction to Joy-Con R Sideways game motion only.
           - Keeps Joy-Con L Sideways and both Vertical transforms unchanged.
-          - Replaces the malformed KPAD down value with a normalized 2D direction for Mario Kart wheel steering.
-          - Keeps signed left/right steering in down.y and a non-negative radial down.x.
           - Preserves the independent Dolphin pointer, calibration, smoothing, recenter, and live indicators.
           - Keeps the external Pointer... button removed and preserves all Point controls inside Motion Input....
 
           Recommended pointer start: Deadzone 0.35 degrees, Smooth 0.10.
           Hardware motion behavior still requires real Joy-Con testing in Mario Kart and Mario Party.
-          "@ | Set-Content "package\README-JoyCon-Dolphin-WiiRemote-V15.txt" -Encoding utf8
+          "@ | Set-Content "package\README-JoyCon-Dolphin-WiiRemote-V16.txt" -Encoding utf8
 
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
-          $zip = "Cemu-JoyCon-Dolphin-WiiRemote-V15-Windows-x64.zip"
+          $zip = "Cemu-JoyCon-Dolphin-WiiRemote-V16-Windows-x64.zip"
           Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal -Force
-          if (-not (Test-Path $zip)) { throw "Final V15 ZIP was not produced" }
+          if (-not (Test-Path $zip)) { throw "Final V16 ZIP was not produced" }
           Write-Host "Cemu.exe SHA-256: $hash"
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-JoyCon-Dolphin-WiiRemote-V15-Windows-x64
-          path: Cemu-JoyCon-Dolphin-WiiRemote-V15-Windows-x64.zip
+          name: Cemu-JoyCon-Dolphin-WiiRemote-V16-Windows-x64
+          path: Cemu-JoyCon-Dolphin-WiiRemote-V16-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
