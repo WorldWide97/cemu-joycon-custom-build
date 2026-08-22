@@ -1,18 +1,13 @@
 name: Build V20 R Gyro Test Windows
 
 on:
-  push:
-    branches: [v20-from-v16]
-    paths:
-      - ".github/workflows/build-cemu-v19-pr.yml"
-      - "tools/apply_cemu_v20_r_sideways_gyro.py"
-      - "V20-BUILD-TRIGGER.txt"
   pull_request:
-    branches: [main]
+    branches: [v20-ci-base]
     paths:
       - ".github/workflows/build-cemu-v19-pr.yml"
       - "tools/apply_cemu_v19_physical_joycon_gyro.py"
       - "tools/apply_cemu_v20_r_sideways_gyro.py"
+      - "V20-CI-TRIGGER.txt"
 
 permissions:
   contents: read
