@@ -1,10 +1,10 @@
-# CI base for isolated Nintendo Switch Sports compatibility testing. Not for main.
+# TEMPORARY CI harness for isolated Nintendo Switch Sports compatibility testing.
 name: Build Eden Switch Sports V1
 
 on:
   pull_request:
     branches:
-      - eden-switch-sports-ci-base
+      - main
     paths:
       - '.github/workflows/build-eden-switch-sports-v1.yml'
       - 'patches/eden-switch-sports-v1.patch'
