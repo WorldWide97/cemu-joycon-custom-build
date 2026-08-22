@@ -1,4 +1,4 @@
-name: Build Cemu Joy-Con Physical Motion V17
+name: Build Cemu Joy-Con Direct Dolphin Motion V18
 
 on:
   workflow_dispatch:
@@ -9,7 +9,8 @@ on:
       - "tools/apply_cemu_v15_r_sideways_kpad_wheel.py"
       - "tools/apply_cemu_v16_restore_v7_kpad_down.py"
       - "tools/apply_cemu_v17_physical_orientation_calibrated_gyro.py"
-      - "V17-BUILD-TRIGGER.txt"
+      - "tools/apply_cemu_v18_dolphin_game_motion.py"
+      - "V18-BUILD-TRIGGER.txt"
 
 permissions:
   contents: read
@@ -83,12 +84,13 @@ jobs:
           python wrapper\tools\apply_cemu_v13_exact_dolphin_motion_input.py cemu
           python wrapper\tools\apply_cemu_v14_v9_game_motion.py cemu
 
-      - name: Apply and validate V15 through V17
+      - name: Apply and validate V15 through V18
         shell: pwsh
         run: |
           python wrapper\tools\apply_cemu_v15_r_sideways_kpad_wheel.py cemu
           python wrapper\tools\apply_cemu_v16_restore_v7_kpad_down.py cemu
           python wrapper\tools\apply_cemu_v17_physical_orientation_calibrated_gyro.py cemu
+          python wrapper\tools\apply_cemu_v18_dolphin_game_motion.py cemu
           git -C cemu diff --check
 
           $controller = Get-Content "cemu\src\input\api\SDL\SDLController.cpp" -Raw
@@ -99,19 +101,16 @@ jobs:
           $wpad = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
 
           foreach ($marker in @(
-            "if (!config->second.is_left && !config->second.vertical)",
-            "v9_game_sensor[0] = -x",
-            "v9_game_sensor[1] = y",
-            "v9_game_sensor[2] = -z",
-            "V15 hardware-proven Joy-Con R Sideways correction",
-            "state.handler.processMotionSample(tsDifD",
             "state.dolphin_pointer_acc = dolphin_acc",
-            "state.dolphin_pointer_gyro = dolphin_gyro"
+            "state.dolphin_pointer_gyro = dolphin_gyro",
+            "glm::vec3 game_acc = dolphin_acc",
+            "V18 game motion is the calibrated Dolphin semantic stream",
+            "state.handler.processDolphinMotionSample(tsDifD"
           )) {
-            if (-not $provider.Contains($marker)) { throw "V17 R Sideways marker missing: $marker" }
+            if (-not $provider.Contains($marker)) { throw "V18 direct Dolphin game-motion marker missing: $marker" }
           }
-          if ($provider.Contains("state.handler.processDolphinMotionSample(tsDifD")) {
-            throw "Dolphin pointer axes still feed Cemu game motion"
+          if ($provider.Contains("Game motion is deliberately NOT Dolphin-oriented")) {
+            throw "V14 V9/raw game-motion routing remains"
           }
           foreach ($marker in @(
             "V17: KPAD down/accVertical is a signed vector.",
@@ -170,7 +169,7 @@ jobs:
           )) {
             if (-not $controller.Contains($marker)) { throw "V17 actual physical transform marker missing: $marker" }
           }
-          Write-Host "Verified V17 source: truthful physical orientation labels, calibrated game gyro, exact V7 KPAD contract, and independent Dolphin pointer."
+          Write-Host "Verified V18 source: direct calibrated Dolphin game motion, signed KPAD steering, truthful orientation, and independent pointer."
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -189,7 +188,7 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Verify and package V17
+      - name: Verify and package V18
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
@@ -215,35 +214,34 @@ jobs:
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item $exe "package\Cemu.exe" -Force
           @"
-          Cemu Joy-Con Physical Motion V17
+          Cemu Joy-Con Direct Dolphin Motion V18
           =================================
           Upstream Cemu: $env:CEMU_COMMIT
           Dolphin pointer reference: $env:DOLPHIN_REFERENCE_COMMIT (2606a)
           User-tested Dolphin Joy-Con fix reference: $env:DOLPHIN_JOYCON_FIX_COMMIT
 
-          V17 changes over V16:
-          - Corrects the Physical orientation UI: Vertical now selects the actual Vertical sensor transform and Sideways selects Sideways.
-          - Runs Dolphin-style stable-mean gyro bias calibration on the Cemu/V9 game motion stream before it reaches KPAD/MotionPlus.
-          - Removes raw game-stream gyro drift while preserving the V7 KPAD down pair used by Mario Kart.
-          - Applies a hardware-verified 180-degree X/Z correction to Joy-Con R Sideways game motion only.
+          V18 changes over V17:
+          - Routes actual Joy-Con game motion through calibrated Dolphin semantic accelerometer and gyroscope axes.
+          - Pointer remains pre-orientation; KPAD/MotionPlus alone receives L Sideways -90 degree and R Sideways 180 degree postfixes.
+          - Keeps signed KPAD down-vector for left/right steering and preserves profile orientation migration.
           - Preserves the independent Dolphin pointer, calibration, smoothing, recenter, and live indicators.
           - Keeps the external Pointer... button removed and preserves all Point controls inside Motion Input....
 
           Recommended pointer start: Deadzone 0.35 degrees, Smooth 0.10.
           Hardware motion behavior still requires real Joy-Con testing in Mario Kart and Mario Party.
-          "@ | Set-Content "package\README-JoyCon-Dolphin-WiiRemote-V17.txt" -Encoding utf8
+          "@ | Set-Content "package\README-JoyCon-Dolphin-WiiRemote-V18.txt" -Encoding utf8
 
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
-          $zip = "Cemu-JoyCon-Dolphin-WiiRemote-V17-Windows-x64.zip"
+          $zip = "Cemu-JoyCon-Dolphin-WiiRemote-V18-Windows-x64.zip"
           Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal -Force
-          if (-not (Test-Path $zip)) { throw "Final V17 ZIP was not produced" }
+          if (-not (Test-Path $zip)) { throw "Final V18 ZIP was not produced" }
           Write-Host "Cemu.exe SHA-256: $hash"
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-JoyCon-Dolphin-WiiRemote-V17-Windows-x64
-          path: Cemu-JoyCon-Dolphin-WiiRemote-V17-Windows-x64.zip
+          name: Cemu-JoyCon-Dolphin-WiiRemote-V18-Windows-x64
+          path: Cemu-JoyCon-Dolphin-WiiRemote-V18-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
