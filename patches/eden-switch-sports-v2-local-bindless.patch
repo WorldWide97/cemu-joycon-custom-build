@@ -1,0 +1,57 @@
+diff --git a/src/shader_recompiler/ir_opt/texture_pass.cpp b/src/shader_recompiler/ir_opt/texture_pass.cpp
+--- a/src/shader_recompiler/ir_opt/texture_pass.cpp
++++ b/src/shader_recompiler/ir_opt/texture_pass.cpp
+@@ -333,30 +333,17 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
+     };
+ }
+ 
+-// TODO:xbzk: shall be dropped when Track method cover all bindless stuff
+-static ConstBufferAddr last_valid_addr = ConstBufferAddr{
+-    .index = 0,
+-    .offset = 0,
+-    .shift_left = 0,
+-    .secondary_index = 0,
+-    .secondary_offset = 0,
+-    .secondary_shift_left = 0,
+-    .dynamic_offset = {},
+-    .count = 1,
+-    .has_secondary = false,
+-};
+-
+-TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst) {
++TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst,
++                     std::optional<ConstBufferAddr>& last_valid_addr) {
+     ConstBufferAddr addr;
+     if (IsBindless(inst)) {
+         const std::optional<ConstBufferAddr> track_addr{Track(inst.Arg(0), env)};
+ 
+         if (!track_addr) {
+-            //throw NotImplementedException("Failed to track bindless texture constant buffer");
+-            addr = last_valid_addr; // TODO:xbzk: shall be dropped when Track method cover all bindless stuff
++            if (!last_valid_addr) {
++                throw NotImplementedException("Failed to track bindless texture constant buffer (no local fallback)");
++            }
++            addr = *last_valid_addr;
+         } else {
+             addr = *track_addr;
+-            last_valid_addr = addr; // TODO:xbzk: shall be dropped when Track method cover all bindless stuff
++            last_valid_addr = addr;
+         }
+     } else {
+         addr = ConstBufferAddr{
+@@ -633,13 +620,14 @@ void PatchImageQueryLod(IR::Block& block, IR::Inst& inst, TextureType type) {
+ } // Anonymous namespace
+ 
+ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info) {
++    std::optional<ConstBufferAddr> last_valid_addr;
+     TextureInstVector to_replace;
+     for (IR::Block* const block : program.post_order_blocks) {
+         for (IR::Inst& inst : block->Instructions()) {
+             if (!IsTextureInstruction(inst)) {
+                 continue;
+             }
+-            to_replace.push_back(MakeInst(env, block, inst));
++            to_replace.push_back(MakeInst(env, block, inst, last_valid_addr));
+         }
+     }
+     // Sort instructions to visit textures by constant buffer index, then by offset

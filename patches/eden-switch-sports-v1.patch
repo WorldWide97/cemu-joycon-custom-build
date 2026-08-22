@@ -1,0 +1,37 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index ddd940c6d..000000000 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -1767,19 +1767,20 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+         return NULL_BINDING;
+     }
+ 
+     const auto size = [&]() {
+-        const bool is_nvn_cbuf = cbuf_index == 0;
+-        // The NVN driver buffer (index 0) is known to pack the SSBO address followed by its size.
+-        if (is_nvn_cbuf) {
+-            const u32 ssbo_size = gpu_memory->Read<u32>(ssbo_addr + 8);
+-            if (ssbo_size != 0) {
+-                return ssbo_size;
+-            }
++        // NVN commonly packs an SSBO descriptor as { u64 gpu_addr, u32 size, u32 reserved }.
++        // Older Eden only trusted this layout when cbuf_index == 0. Newer evidence shows the
++        // same packed descriptor can live in other constant buffers as well. Detect the layout
++        // from the descriptor data itself instead of the cbuf index.
++        const u32 memory_layout_size =
++            static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
++        const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
++        const u32 packed_size = static_cast<u32>(next_qword);
++        const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
++                                        packed_size != 0 &&
++                                        packed_size <= memory_layout_size;
++        if (next_qword_is_size) {
++            return packed_size;
+         }
+-        // Other titles (notably Doom Eternal) may use STG/LDG on buffer addresses in custom defined
+-        // cbufs, which do not store the sizes adjacent to the addresses, so use the fully
+-        // mapped buffer size for now.
+-        const u32 memory_layout_size = static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+         return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
+     }();
+     // Alignment only applies to the offset of the buffer
