@@ -1,16 +1,10 @@
-# Isolated Nintendo Switch Sports compatibility test workflow. Do not merge into main.
+# CI base for isolated Nintendo Switch Sports compatibility testing. Not for main.
 name: Build Eden Switch Sports V1
 
 on:
-  push:
-    branches:
-      - eden-switch-sports-v1
-    paths:
-      - '.github/workflows/build-eden-switch-sports-v1.yml'
-      - 'patches/eden-switch-sports-v1.patch'
   pull_request:
     branches:
-      - main
+      - eden-switch-sports-ci-base
     paths:
       - '.github/workflows/build-eden-switch-sports-v1.yml'
       - 'patches/eden-switch-sports-v1.patch'
