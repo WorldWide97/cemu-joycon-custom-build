@@ -1,0 +1,3 @@
+Cemu Joy-Con Dolphin Motion V10 build trigger.
+Dolphin reference: c77bbaa0f372c3f72281602a8b087206706542cb
+Joy-Con R 180 fix reference: fb80816da78ff221456b9c880bf093d60219ebbc

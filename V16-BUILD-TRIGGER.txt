@@ -1,0 +1,1 @@
+V16 restores the exact known-good V7/upstream Cemu KPAD down contract for Mario Kart motion.

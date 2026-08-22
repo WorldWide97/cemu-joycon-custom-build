@@ -1,0 +1,15 @@
+V10 behavior reference
+======================
+Dolphin baseline: dolphin-emu/dolphin c77bbaa0f372c3f72281602a8b087206706542cb (2606a)
+User-tested custom Joy-Con repository: WorldWide97/dolphin-joycon-fix
+Final R fix commit: fb80816da78ff221456b9c880bf093d60219ebbc
+
+Working user profile values mirrored by V10:
+- Gyroscope deadzone: 2 degrees/second
+- Gyroscope calibration period: 3 seconds
+- Minimum stable calibration update rate: 25 Hz
+- IMU pointer accelerometer influence: 1 percent
+- IMU pointer Total Yaw: 25 degrees
+- Default Wii IR vertical FOV reference: 31.5 degrees
+- Joy-Con R natural Sideways fix: one 180-degree Z orientation turn for general Wii Remote motion
+- Pointer consumes the pre-orientation IMU stream, as Dolphin does
