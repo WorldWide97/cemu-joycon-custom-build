@@ -1,4 +1,4 @@
-name: Build V19 Gyro Test Windows
+name: Build V20 R Gyro Test Windows
 
 on:
   pull_request:
@@ -6,8 +6,7 @@ on:
     paths:
       - ".github/workflows/build-cemu-v19-pr.yml"
       - "tools/apply_cemu_v19_physical_joycon_gyro.py"
-      - "V19-BUILD-TRIGGER.txt"
-      - "V19-PR-TRIGGER.txt"
+      - "tools/apply_cemu_v20_r_sideways_gyro.py"
 
 permissions:
   contents: read
@@ -73,12 +72,13 @@ jobs:
           python wrapper\tools\apply_cemu_v13_exact_dolphin_motion_input.py cemu
           python wrapper\tools\apply_cemu_v14_v9_game_motion.py cemu
 
-      - name: Apply V15 V16 and V19 gyro-only fix
+      - name: Apply V15 V16 V19 and V20 R gyro fix
         shell: pwsh
         run: |
           python wrapper\tools\apply_cemu_v15_r_sideways_kpad_wheel.py cemu
           python wrapper\tools\apply_cemu_v16_restore_v7_kpad_down.py cemu
           python wrapper\tools\apply_cemu_v19_physical_joycon_gyro.py cemu
+          python wrapper\tools\apply_cemu_v20_r_sideways_gyro.py cemu
           git -C cemu diff --check
 
           $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
@@ -87,10 +87,12 @@ jobs:
             "V19 gyro-only fix: use the physical/native Joy-Con gyro basis",
             "glm::vec3 game_gyro = raw_gyro",
             "Stock Dolphin Joy-Con L Sideways orientation: RotateZ(-90)",
-            "User/hardware-proven Joy-Con R Sideways orientation: RotateZ(180)",
+            "V20: Joy-Con R natural Sideways physical orientation is RotateZ(+90)",
+            "game_gyro.x = -game_gyro.y",
+            "game_gyro.y = old_x",
             "tracking.gyro = game_gyro"
           )) {
-            if (-not $provider.Contains($marker)) { throw "V19 gyro marker missing: $marker" }
+            if (-not $provider.Contains($marker)) { throw "V20 gyro marker missing: $marker" }
           }
           foreach ($marker in @(
             "V16 restores the exact V7/upstream Cemu KPAD down contract",
@@ -99,9 +101,10 @@ jobs:
           )) {
             if (-not $wpad.Contains($marker)) { throw "V16 KPAD marker missing: $marker" }
           }
+          if ($provider.Contains("User/hardware-proven Joy-Con R Sideways orientation: RotateZ(180)")) { throw "Old V19 R gyro rotation leaked into V20" }
           if ($provider.Contains("glm::vec3 game_acc = dolphin_acc")) { throw "Accelerometer changed from V16" }
-          if ($provider.Contains("dolphin_game_gyro_bias")) { throw "V17 gyro path leaked into V19" }
-          if ($provider.Contains("V18 game motion is the calibrated Dolphin semantic stream")) { throw "V18 path leaked into V19" }
+          if ($provider.Contains("dolphin_game_gyro_bias")) { throw "V17 gyro path leaked into V20" }
+          if ($provider.Contains("V18 game motion is the calibrated Dolphin semantic stream")) { throw "V18 path leaked into V20" }
           if ($provider.Contains("state.handler.processDolphinMotionSample(tsDifD")) { throw "Game MotionHandler path changed from V16" }
 
       - name: Setup CMake
@@ -121,7 +124,7 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Package V19
+      - name: Package V20
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
@@ -129,23 +132,24 @@ jobs:
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item $exe "package\Cemu.exe" -Force
           @"
-          Cemu Joy-Con Physical Gyro V19
-          ===============================
+          Cemu Joy-Con R Sideways Gyro V20
+          =================================
           Baseline: V16 c78d7ce9f4cd4dd247acbe57e495d1b92c8eb6a1
-          Change: game gyro mapping only.
-          Preserved exactly from V16: accelerometer, V7 KPAD/down, pointer, UI and remaining behavior.
-          Joy-Con L/R gyro axes are reconstructed to the physical/native frame before the selected Sideways presentation rotation.
+          V19 base: physical/native Joy-Con game gyro mapping.
+          V20 change: Joy-Con R Sideways gyro only, RotateZ(180) -> RotateZ(+90).
+          Joy-Con L Sideways remains the hardware-confirmed correct RotateZ(-90) path.
+          Preserved from V16: accelerometer, V7 KPAD/down, pointer, UI and all remaining behavior.
           No V17 game-gyro calibration and no V18 Dolphin accelerometer/game-motion routing.
-          "@ | Set-Content "package\README-V19.txt" -Encoding utf8
+          "@ | Set-Content "package\README-V20.txt" -Encoding utf8
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
-          Compress-Archive -Path "package\*" -DestinationPath "Cemu-JoyCon-Dolphin-WiiRemote-V19-Windows-x64.zip" -CompressionLevel Optimal -Force
+          Compress-Archive -Path "package\*" -DestinationPath "Cemu-JoyCon-Dolphin-WiiRemote-V20-Windows-x64.zip" -CompressionLevel Optimal -Force
           Write-Host "Cemu.exe SHA-256: $hash"
 
-      - name: Upload V19 Windows build
+      - name: Upload V20 Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-JoyCon-Dolphin-WiiRemote-V19-Windows-x64
-          path: Cemu-JoyCon-Dolphin-WiiRemote-V19-Windows-x64.zip
+          name: Cemu-JoyCon-Dolphin-WiiRemote-V20-Windows-x64
+          path: Cemu-JoyCon-Dolphin-WiiRemote-V20-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
