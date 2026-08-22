@@ -114,14 +114,14 @@ jobs:
             throw "Dolphin pointer axes still feed Cemu game motion"
           }
           foreach ($marker in @(
-            "V16 restores the exact V7/upstream Cemu KPAD down contract",
-            "status.accVertical.x = std::min(1.0f, std::abs(acc.x + acc.y))",
-            "status.accVertical.y = std::min(std::max(-1.0f, -acc.z), 1.0f)"
+            "V17: KPAD down/accVertical is a signed vector.",
+            "status.accVertical.x = std::clamp(acc.x + acc.y, -1.0f, 1.0f)",
+            "status.accVertical.y = std::clamp(-acc.z, -1.0f, 1.0f)"
           )) {
-            if (-not $wpad.Contains($marker)) { throw "V17 exact V7 KPAD down marker missing: $marker" }
+            if (-not $wpad.Contains($marker)) { throw "V17 signed KPAD down marker missing: $marker" }
           }
-          if ($wpad.Contains("const float down_horizontal") -or $wpad.Contains("std::clamp(acc.x + acc.y")) {
-            throw "V11/V15 experimental KPAD down calculation remains"
+          if ($wpad.Contains("std::abs(acc.x + acc.y)") -or $wpad.Contains("const float down_horizontal")) {
+            throw "Unsigned KPAD down calculation remains"
           }
           foreach ($marker in @(
             "get_dolphin_total_yaw_degrees",
@@ -164,7 +164,9 @@ jobs:
             "const bool physical_vertical = orientation == JoyConOrientation::Vertical;",
             "const bool physical_vertical = get_joycon_orientation() == JoyConOrientation::Vertical;",
             "set_joycon_orientation(JoyConOrientation::Vertical);",
-            "if (get_joycon_orientation() == JoyConOrientation::Vertical)"
+            "if (get_joycon_orientation() == JoyConOrientation::Vertical)",
+            "joycon_orientation_v17",
+            "profiles stored the inverse enum"
           )) {
             if (-not $controller.Contains($marker)) { throw "V17 actual physical transform marker missing: $marker" }
           }

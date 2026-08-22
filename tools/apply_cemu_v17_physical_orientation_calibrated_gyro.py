@@ -117,4 +117,38 @@ replace_once(
     "apply control transform in actual Vertical orientation",
 )
 
-print("Applied Cemu V17 physical orientation labels and calibrated game gyro")
+# Profiles written before V17 stored the inverse enum value. Preserve the
+# physical pose the user had selected, then mark every profile saved by V17 so
+# it is not migrated twice on later loads.
+replace_once(
+    controller_cpp,
+    '''\tnode.append_child("joycon_orientation").append_child(pugi::node_pcdata).set_value(fmt::format("{}", (int)get_joycon_orientation()).c_str());\n''',
+    '''\tnode.append_child("joycon_orientation").append_child(pugi::node_pcdata).set_value(fmt::format("{}", (int)get_joycon_orientation()).c_str());\n\tnode.append_child("joycon_orientation_v17").append_child(pugi::node_pcdata).set_value("1");\n''',
+    "mark direct physical-orientation profiles",
+)
+
+replace_once(
+    controller_cpp,
+    '''\tJoyConOrientation orientation = JoyConOrientation::Sideways;\n\tif (const auto value = node.child("joycon_orientation"))\n\t{\n\t\tif (ConvertString<int>(value.child_value()) == (int)JoyConOrientation::Vertical)\n\t\t\torientation = JoyConOrientation::Vertical;\n\t}\n\tset_joycon_orientation(orientation, false);\n''',
+    '''\tJoyConOrientation orientation = JoyConOrientation::Sideways;\n\tif (const auto value = node.child("joycon_orientation"))\n\t{\n\t\tif (ConvertString<int>(value.child_value()) == (int)JoyConOrientation::Vertical)\n\t\t\torientation = JoyConOrientation::Vertical;\n\t\t// V17 stores the enum in the same physical sense as its label. Old V2-V16\n\t\t// profiles stored the inverse enum, so swap it once while loading them.\n\t\tif (!node.child("joycon_orientation_v17"))\n\t\t\torientation = orientation == JoyConOrientation::Vertical ?\n\t\t\t\tJoyConOrientation::Sideways : JoyConOrientation::Vertical;\n\t}\n\tset_joycon_orientation(orientation, false);\n''',
+    "migrate inverse pre-V17 physical orientation profiles",
+)
+
+# V16 restored an older V7 formula with abs(), but abs erases the left/right
+# sign before KPAD receives it. Mario Kart and Mario Party need the signed
+# down-vector exactly as the Wii Remote contract expects.
+wpad_cpp = root / "src/input/emulated/WPADController.cpp"
+replace_once(
+    wpad_cpp,
+    '''#include <cmath>\n''',
+    '''#include <algorithm>\n#include <cmath>\n''',
+    "include algorithm for signed KPAD clamp",
+)
+replace_once(
+    wpad_cpp,
+    '''\t\t// V16 restores the exact V7/upstream Cemu KPAD down contract.\n\t\t// X is the non-negative horizontal magnitude; Y retains signed roll.\n\t\t// Mario Kart consumed this exact pair correctly in the known-good builds.\n\t\tstatus.accVertical.x = std::min(1.0f, std::abs(acc.x + acc.y));\n\t\tstatus.accVertical.y = std::min(std::max(-1.0f, -acc.z), 1.0f);\n''',
+    '''\t\t// V17: KPAD down/accVertical is a signed vector. Keep left/right sign;\n\t\t// abs() makes the two steering directions indistinguishable to games.\n\t\tstatus.accVertical.x = std::clamp(acc.x + acc.y, -1.0f, 1.0f);\n\t\tstatus.accVertical.y = std::clamp(-acc.z, -1.0f, 1.0f);\n''',
+    "restore signed KPAD down-vector for accelerometer steering",
+)
+
+print("Applied Cemu V17 physical orientation, signed KPAD motion, and calibrated game gyro")
