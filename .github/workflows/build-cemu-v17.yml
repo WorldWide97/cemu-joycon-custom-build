@@ -160,6 +160,14 @@ jobs:
           )) {
             if (-not $panel.Contains($marker)) { throw "V17 physical orientation marker missing: $marker" }
           }
+          foreach ($marker in @(
+            "const bool physical_vertical = orientation == JoyConOrientation::Vertical;",
+            "const bool physical_vertical = get_joycon_orientation() == JoyConOrientation::Vertical;",
+            "set_joycon_orientation(JoyConOrientation::Vertical);",
+            "if (get_joycon_orientation() == JoyConOrientation::Vertical)"
+          )) {
+            if (-not $controller.Contains($marker)) { throw "V17 actual physical transform marker missing: $marker" }
+          }
           Write-Host "Verified V17 source: truthful physical orientation labels, calibrated game gyro, exact V7 KPAD contract, and independent Dolphin pointer."
 
       - name: Setup CMake

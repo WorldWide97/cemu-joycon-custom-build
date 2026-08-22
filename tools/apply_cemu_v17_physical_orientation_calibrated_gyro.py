@@ -8,6 +8,7 @@ if len(sys.argv) != 2:
 root = Path(sys.argv[1])
 provider_h = root / "src/input/api/SDL/SDLControllerProvider.h"
 provider_cpp = root / "src/input/api/SDL/SDLControllerProvider.cpp"
+controller_cpp = root / "src/input/api/SDL/SDLController.cpp"
 panel_cpp = root / "src/gui/wxgui/input/panels/WiimoteInputPanel.cpp"
 
 
@@ -75,6 +76,45 @@ replace_once(
     '''\t\tjoycon->set_joycon_orientation(orientation->GetSelection() == 0 ?\n\t\t\tSDLController::JoyConOrientation::Vertical : SDLController::JoyConOrientation::Sideways);\n''',
     '''\t\tjoycon->set_joycon_orientation(orientation->GetSelection() == 1 ?\n\t\t\tSDLController::JoyConOrientation::Vertical : SDLController::JoyConOrientation::Sideways);\n''',
     "make dialog orientation selection truthful",
+)
+
+# V5/V6 also carried the old inversion beneath the UI: the enum sent to the
+# sensor provider, button transform, and hotkeys was opposite to its name.
+# Correct every layer together, otherwise a truthful "Vertical" label would
+# still produce Sideways accelerometer / gyro data.
+replace_once(
+    controller_cpp,
+    '''\t\t// V5 user semantics: internal Sideways == physical Vertical.\n\t\tconst bool physical_vertical = orientation == JoyConOrientation::Sideways;\n''',
+    '''\t\t// V17: the stored enum and the physical sensor orientation agree.\n\t\tconst bool physical_vertical = orientation == JoyConOrientation::Vertical;\n''',
+    "send truthful physical orientation to motion provider",
+)
+
+replace_once(
+    controller_cpp,
+    '''\t\t// Internal Vertical is the physical Sideways transform and vice versa.\n\t\tconst char* mode = orientation == JoyConOrientation::Vertical ? "Sideways" : "Vertical";\n''',
+    '''\t\tconst char* mode = orientation == JoyConOrientation::Vertical ? "Vertical" : "Sideways";\n''',
+    "make orientation OSD truthful",
+)
+
+replace_once(
+    controller_cpp,
+    '''\t\t// V5 user semantics: internal Sideways == physical Vertical.\n\t\tconst bool physical_vertical = get_joycon_orientation() == JoyConOrientation::Sideways;\n''',
+    '''\t\t// V17: restore the selected physical orientation after reconnecting.\n\t\tconst bool physical_vertical = get_joycon_orientation() == JoyConOrientation::Vertical;\n''',
+    "restore truthful physical orientation on reconnect",
+)
+
+replace_once(
+    controller_cpp,
+    '''\t\t// The internal transform enum is opposite to the physical Joy-Con\n\t\t// orientation because SDL is permanently kept in mini-gamepad mode.\n\t\tif (vertical_pressed && !m_vertical_hotkey_latched)\n\t\t\tset_joycon_orientation(JoyConOrientation::Sideways);\n\t\tif (sideways_pressed && !m_sideways_hotkey_latched)\n\t\t\tset_joycon_orientation(JoyConOrientation::Vertical);\n''',
+    '''\t\tif (vertical_pressed && !m_vertical_hotkey_latched)\n\t\t\tset_joycon_orientation(JoyConOrientation::Vertical);\n\t\tif (sideways_pressed && !m_sideways_hotkey_latched)\n\t\t\tset_joycon_orientation(JoyConOrientation::Sideways);\n''',
+    "make physical orientation hotkeys truthful",
+)
+
+replace_once(
+    controller_cpp,
+    '''\t\t// SDL already exposes a separate Joy-Con as a horizontal mini-gamepad.\n\t\t// Rotate controls only when the USER is physically holding it Vertical.\n\t\tif (get_joycon_orientation() == JoyConOrientation::Sideways)\n\t\t\tapply_vertical_transform(result);\n''',
+    '''\t\t// Rotate controls only when the selected physical orientation is Vertical.\n\t\tif (get_joycon_orientation() == JoyConOrientation::Vertical)\n\t\t\tapply_vertical_transform(result);\n''',
+    "apply control transform in actual Vertical orientation",
 )
 
 print("Applied Cemu V17 physical orientation labels and calibrated game gyro")
