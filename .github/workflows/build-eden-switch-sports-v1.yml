@@ -1,3 +1,4 @@
+# Isolated Nintendo Switch Sports compatibility test workflow. Do not merge into main.
 name: Build Eden Switch Sports V1
 
 on:
