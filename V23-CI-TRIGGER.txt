@@ -1,0 +1,2 @@
+V23 isolated CI trigger.
+Build only the Mario Kart KPAD basis correction on top of hardware-approved V22.
