@@ -1,0 +1,1 @@
+Trigger isolated V24 Mario Kart 8 KPAD-only 90-degree validation build.
