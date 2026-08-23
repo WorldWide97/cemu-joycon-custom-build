@@ -1,0 +1,1 @@
+V26 wrapper base: V22 + hardware-approved V25-Z. V26 changes only Mario Kart 8 shortcut semantics; V25-Z KPAD math must remain byte-identical.
