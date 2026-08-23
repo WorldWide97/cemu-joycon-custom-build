@@ -1,0 +1,128 @@
+diff --git a/src/core/device_memory_manager.inc b/src/core/device_memory_manager.inc
+index 52dff5df9..111111111 100644
+--- a/src/core/device_memory_manager.inc
++++ b/src/core/device_memory_manager.inc
+@@ -5,8 +5,11 @@
+ #include <limits>
+ #include <memory>
+ #include <type_traits>
++#include <vector>
++
++#include <boost/container/deque.hpp>
+ 
+ #include "common/address_space.h"
+ #include "common/address_space.inc"
+ #include "common/alignment.h"
+@@ -27,21 +30,23 @@ public:
+ 
+     void GatherValues(u32 start_entry, Common::ScratchBuffer<u32>& buffer) {
+         buffer.resize(8);
+-        buffer.resize(0);
+-        size_t index = 0;
+-        const auto add_value = [&](u32 value) {
+-            buffer.resize(index + 1);
++        const auto add_value = [&buffer](u32 value, size_t index) {
++            if (buffer.size() < index + 1) {
++                buffer.resize(index + 8);
++            }
+             buffer[index++] = value;
++            return index;
+         };
+ 
++        size_t index = 0;
+         u32 iter_entry = start_entry;
+         Entry* current = &storage[iter_entry - 1];
+-        add_value(current->value);
++        index = add_value(current->value, index);
+         while (current->next_entry != 0) {
+             iter_entry = current->next_entry;
+             current = &storage[iter_entry - 1];
+-            add_value(current->value);
++            index = add_value(current->value, index);
+         }
++        buffer.resize(index);
+     }
+ 
+     u32 Register(u32 value) {
+@@ -116,8 +121,8 @@ private:
+         u32 value{};
+     };
+ 
+-    std::deque<Entry> storage;
+-    std::deque<u32> free_entries;
++    std::vector<Entry> storage;
++    boost::container::deque<u32> free_entries;
+ };
+ 
+ struct EmptyAllocator {
+@@ -210,6 +215,13 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
+                                       bool track) {
++    const DAddr trace_end = address + static_cast<DAddr>(size);
++    const bool v3_trace = size >= (1ULL << 20) ||
++                          (address < 0x000000008B000000ULL &&
++                           trace_end > 0x000000008A000000ULL);
++    if (v3_trace) {
++        LOG_INFO(HW_Memory, "V3 Device Map: daddr={:#016x} vaddr={:#016x} size={} asid={} track={}",
++                 address, virtual_address, size, asid.id, track);
++    }
+     Core::Memory::Memory* process_memory = registered_processes[asid.id];
+     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
+     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+@@ -246,6 +258,12 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
+ 
+ template <typename Traits>
+ void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
++    const DAddr trace_end = address + static_cast<DAddr>(size);
++    const bool v3_trace = size >= (1ULL << 20) ||
++                          (address < 0x000000008B000000ULL &&
++                           trace_end > 0x000000008A000000ULL);
++    if (v3_trace) {
++        LOG_INFO(HW_Memory, "V3 Device Unmap: daddr={:#016x} size={}", address, size);
++    }
+     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
+     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+     device_inter->InvalidateRegion(address, size);
+@@ -419,10 +437,20 @@ void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, s
+     WalkBlock(
+         address, size,
+         [&](size_t copy_amount, DAddr current_vaddr) {
++            const size_t page_index = current_vaddr >> Memory::YUZU_PAGEBITS;
++            const size_t continuity = static_cast<size_t>(continuity_tracker[page_index]);
++            const auto prev_phys = page_index > 0 ? compressed_physical_ptr[page_index - 1] : 0;
++            const size_t next_index = page_index + continuity;
++            const auto next_phys = next_index < compressed_physical_ptr.size()
++                                       ? compressed_physical_ptr[next_index]
++                                       : 0;
+             LOG_ERROR(
+                 HW_Memory,
+-                "Unmapped Device ReadBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
+-                current_vaddr, address, size);
++                "V3 Unmapped Device ReadBlock(SAFE) @ {:#016x} (start={:#016x}, size={}, "
++                "chunk={}, page={}, continuity_pages={}, prev_phys={}, next_phys={})",
++                current_vaddr, address, size, copy_amount, page_index, continuity, prev_phys,
++                next_phys);
+             std::memset(dest_pointer, 0, copy_amount);
+         },
+         [&](size_t copy_amount, const u8* const src_ptr) {
+@@ -459,10 +487,20 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
+     WalkBlock(
+         address, size,
+         [&](size_t copy_amount, DAddr current_vaddr) {
++            const size_t page_index = current_vaddr >> Memory::YUZU_PAGEBITS;
++            const size_t continuity = static_cast<size_t>(continuity_tracker[page_index]);
++            const auto prev_phys = page_index > 0 ? compressed_physical_ptr[page_index - 1] : 0;
++            const size_t next_index = page_index + continuity;
++            const auto next_phys = next_index < compressed_physical_ptr.size()
++                                       ? compressed_physical_ptr[next_index]
++                                       : 0;
+             LOG_ERROR(
+                 HW_Memory,
+-                "Unmapped Device ReadBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
+-                current_vaddr, address, size);
++                "V3 Unmapped Device ReadBlock(UNSAFE) @ {:#016x} (start={:#016x}, size={}, "
++                "chunk={}, page={}, continuity_pages={}, prev_phys={}, next_phys={})",
++                current_vaddr, address, size, copy_amount, page_index, continuity, prev_phys,
++                next_phys);
+             std::memset(dest_pointer, 0, copy_amount);
+         },
+         [&](size_t copy_amount, const u8* const src_ptr) {
