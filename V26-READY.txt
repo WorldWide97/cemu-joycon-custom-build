@@ -1,0 +1,1 @@
+V26 ready for isolated CI: V22 + V25-Z unchanged motion, Mario Kart-only 1:1 Sideways/Vertical hotkey dispatch.
