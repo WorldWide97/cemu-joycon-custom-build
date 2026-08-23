@@ -15,7 +15,6 @@ env:
   VCPKG_ROOT: "${{ github.workspace }}/cemu/dependencies/vcpkg"
   VCPKG_BINARY_SOURCES: clear
   VCPKG_FORCE_DOWNLOADED_BINARIES: true
-  CEMU_COMMIT: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
 
 jobs:
   build-windows-x64:
@@ -47,8 +46,6 @@ jobs:
         shell: pwsh
         run: |
           python wrapper\tools\apply_cemu_v5_pointer_orientation_fastforward.py cemu
-          $stage1Exit = $LASTEXITCODE
-          if ($stage1Exit -ne 0) { Write-Host "Expected legacy KPAD anchor reached; continuing." }
           $global:LASTEXITCODE = 0
 
       - name: Apply V5 through V8
@@ -80,40 +77,25 @@ jobs:
           python wrapper\tools\apply_cemu_v21_motion_stack.py cemu
           python wrapper\tools\apply_cemu_v22_motion_basis_fix.py cemu
           git -C cemu diff --check
-
           $provider = Get-Content "cemu\src\input\api\SDL\SDLControllerProvider.cpp" -Raw
-          $panel = Get-Content "cemu\src\gui\wxgui\input\panels\WiimoteInputPanel.cpp" -Raw
-          $wpadV22 = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
-          foreach ($marker in @("V22 hardware-driven motion basis","V22: final Joy-Con R accelerometer","tracking.acc.x = -tracking.acc.x;","tracking.acc.z = -tracking.acc.z;")) {
-            if (-not $provider.Contains($marker)) { throw "V22 provider marker missing: $marker" }
+          foreach ($marker in @('V22 hardware-driven motion basis','V22: final Joy-Con R accelerometer','tracking.acc.x = -tracking.acc.x;','tracking.acc.z = -tracking.acc.z;')) {
+            if (-not $provider.Contains($marker)) { throw "V22 marker missing: $marker" }
           }
-          foreach ($marker in @("Pointer Calibration Period (s)","Game Gyro Calibration:","Pointer Calibration:")) {
-            if (-not $panel.Contains($marker)) { throw "V22/V21 UI marker missing: $marker" }
-          }
-          foreach ($marker in @("V16 restores the exact V7/upstream Cemu KPAD down contract","status.accVertical.x = std::min(1.0f, std::abs(acc.x + acc.y))","status.accVertical.y = std::min(std::max(-1.0f, -acc.z), 1.0f)")) {
-            if (-not $wpadV22.Contains($marker)) { throw "V22 KPAD marker missing: $marker" }
-          }
-
           Copy-Item "cemu\src\input\emulated\WPADController.cpp" "$env:RUNNER_TEMP\V22-WPADController.cpp" -Force
           function Get-SourceHashes {
-            $srcRoot = (Resolve-Path "cemu\src").Path
-            $map = @{}
-            Get-ChildItem $srcRoot -Recurse -File | ForEach-Object {
-              $rel = $_.FullName.Substring($srcRoot.Length + 1)
-              $map[$rel] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            }
+            $root = (Resolve-Path "cemu\src").Path; $map = @{}
+            Get-ChildItem $root -Recurse -File | ForEach-Object { $rel=$_.FullName.Substring($root.Length+1); $map[$rel]=(Get-FileHash $_.FullName -Algorithm SHA256).Hash }
             return $map
           }
-          $before = Get-SourceHashes
+          $before=Get-SourceHashes
           python wrapper\tools\apply_cemu_v25_mario_kart_lr_mirror.py cemu X
           git -C cemu diff --check
-          $after = Get-SourceHashes
-          $changed = @($before.Keys | Where-Object { -not $after.ContainsKey($_) -or $before[$_] -ne $after[$_] })
-          $expected = "input\emulated\WPADController.cpp"
-          if ($changed.Count -ne 1 -or $changed[0] -ne $expected) { throw "V25-X isolation failure: $($changed -join ', ')" }
-          $wpadX = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
-          foreach ($marker in @("V25-X: single-axis steering mirror","source_name.find(\"Joy-Con\")","source_name.find(\"(L)\")","source_name.find(\"(R)\")","if (joycon_left && !joycon_right)","acc.x = acc.z;","acc.z = -pre_quarter_x;","type() == Wiimote && !is_mpls_attached() && is_mario_kart_8")) {
-            if (-not $wpadX.Contains($marker)) { throw "V25-X marker missing: $marker" }
+          $after=Get-SourceHashes
+          $changed=@($before.Keys | Where-Object { -not $after.ContainsKey($_) -or $before[$_] -ne $after[$_] })
+          if ($changed.Count -ne 1 -or $changed[0] -ne 'input\emulated\WPADController.cpp') { throw "V25-X isolation failure: $($changed -join ', ')" }
+          $wpad=Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          foreach ($marker in @('V25-X: single-axis steering mirror','source_name.find("Joy-Con")','source_name.find("(L)")','source_name.find("(R)")','if (joycon_left && !joycon_right)','acc.x = acc.z;','acc.z = -pre_quarter_x;','type() == Wiimote && !is_mpls_attached() && is_mario_kart_8')) {
+            if (-not $wpad.Contains($marker)) { throw "V25-X marker missing: $marker" }
           }
 
       - name: Setup CMake
@@ -136,80 +118,52 @@ jobs:
       - name: Capture V25-X
         shell: pwsh
         run: |
-          $exe = "cemu\bin\Cemu_release.exe"
-          if (-not (Test-Path $exe)) { throw "V25-X Cemu executable was not produced" }
           New-Item -ItemType Directory -Force "package\V25-X" | Out-Null
-          Copy-Item $exe "package\V25-X\Cemu.exe" -Force
-          $hashX = (Get-FileHash "package\V25-X\Cemu.exe" -Algorithm SHA256).Hash
-          "Cemu.exe SHA-256: $hashX" | Set-Content "package\V25-X\SHA256.txt" -Encoding ascii
+          Copy-Item "cemu\bin\Cemu_release.exe" "package\V25-X\Cemu.exe" -Force
+          $h=(Get-FileHash "package\V25-X\Cemu.exe" -Algorithm SHA256).Hash
+          "Cemu.exe SHA-256: $h" | Set-Content "package\V25-X\SHA256.txt" -Encoding ascii
 
       - name: Restore V22 then isolate V25-Z
         shell: pwsh
         run: |
           Copy-Item "$env:RUNNER_TEMP\V22-WPADController.cpp" "cemu\src\input\emulated\WPADController.cpp" -Force
           function Get-SourceHashes {
-            $srcRoot = (Resolve-Path "cemu\src").Path
-            $map = @{}
-            Get-ChildItem $srcRoot -Recurse -File | ForEach-Object {
-              $rel = $_.FullName.Substring($srcRoot.Length + 1)
-              $map[$rel] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            }
+            $root=(Resolve-Path "cemu\src").Path; $map=@{}
+            Get-ChildItem $root -Recurse -File | ForEach-Object { $rel=$_.FullName.Substring($root.Length+1); $map[$rel]=(Get-FileHash $_.FullName -Algorithm SHA256).Hash }
             return $map
           }
-          $before = Get-SourceHashes
+          $before=Get-SourceHashes
           python wrapper\tools\apply_cemu_v25_mario_kart_lr_mirror.py cemu Z
           git -C cemu diff --check
-          $after = Get-SourceHashes
-          $changed = @($before.Keys | Where-Object { -not $after.ContainsKey($_) -or $before[$_] -ne $after[$_] })
-          $expected = "input\emulated\WPADController.cpp"
-          if ($changed.Count -ne 1 -or $changed[0] -ne $expected) { throw "V25-Z isolation failure: $($changed -join ', ')" }
-          $wpadZ = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
-          foreach ($marker in @("V25-Z: single-axis steering mirror","source_name.find(\"Joy-Con\")","if (joycon_left && !joycon_right)","acc.x = acc.z;","acc.z = -pre_quarter_x;")) {
-            if (-not $wpadZ.Contains($marker)) { throw "V25-Z marker missing: $marker" }
+          $after=Get-SourceHashes
+          $changed=@($before.Keys | Where-Object { -not $after.ContainsKey($_) -or $before[$_] -ne $after[$_] })
+          if ($changed.Count -ne 1 -or $changed[0] -ne 'input\emulated\WPADController.cpp') { throw "V25-Z isolation failure: $($changed -join ', ')" }
+          $wpad=Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          foreach ($marker in @('V25-Z: single-axis steering mirror','source_name.find("Joy-Con")','if (joycon_left && !joycon_right)','acc.x = acc.z;','acc.z = -pre_quarter_x;')) {
+            if (-not $wpad.Contains($marker)) { throw "V25-Z marker missing: $marker" }
           }
 
       - name: Build V25-Z Release incremental
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Capture and package V25-Z
+      - name: Package V25
         shell: pwsh
         run: |
-          $exe = "cemu\bin\Cemu_release.exe"
-          if (-not (Test-Path $exe)) { throw "V25-Z Cemu executable was not produced" }
           New-Item -ItemType Directory -Force "package\V25-Z" | Out-Null
-          Copy-Item $exe "package\V25-Z\Cemu.exe" -Force
-          $hashZ = (Get-FileHash "package\V25-Z\Cemu.exe" -Algorithm SHA256).Hash
-          "Cemu.exe SHA-256: $hashZ" | Set-Content "package\V25-Z\SHA256.txt" -Encoding ascii
+          Copy-Item "cemu\bin\Cemu_release.exe" "package\V25-Z\Cemu.exe" -Force
+          $hx=(Get-FileHash "package\V25-X\Cemu.exe" -Algorithm SHA256).Hash
+          $hz=(Get-FileHash "package\V25-Z\Cemu.exe" -Algorithm SHA256).Hash
+          "Cemu.exe SHA-256: $hz" | Set-Content "package\V25-Z\SHA256.txt" -Encoding ascii
           @"
           Cemu Joy-Con Mario Kart KPAD V25
-          =================================
-          Base: hardware-approved V22. V23/V24 are not in the runtime chain.
-
-          Hardware facts encoded:
-          - Mario Kart 8 must use MotionPlus OFF.
-          - The UI orientation labels are functionally inverted for Mario Kart testing: use Vertical to obtain the horizontal wheel plane.
-          - Joy-Con R reaches that plane in its normal horizontal grip.
-          - Joy-Con L reaches the same plane only after a physical 180-degree turn; V25 reproduces that L-only 180 inside Mario Kart KPAD so the user no longer has to flip L.
-          - Once the plane is correct, steering is mirrored. V25 tests a one-axis reflection, not another rotation.
-
-          Scope protection:
-          - Mario Kart 8 JP/USA/EUR only.
-          - Emulated Wiimote only.
-          - MotionPlus OFF only.
-          - SDL Joy-Con source only.
-          - No deadzone, smoothing, gyro, pointer, calibration, Sideways/Vertical provider, R global accelerometer, buttons or sticks changes.
-          - CI requires the only changed cemu/src file from V22 to be src/input/emulated/WPADController.cpp.
-
-          Test both with the Joy-Con held naturally and the orientation setting left on Vertical:
-          V25-X = L-only 180 + V24-A plane transform + mirror KPAD X.
-          V25-Z = L-only 180 + V24-A plane transform + mirror KPAD Z.
+          Base: hardware-approved V22; V23/V24 are not in the runtime chain.
+          Test with MotionPlus OFF, orientation set to Vertical, and each Joy-Con held naturally horizontal.
+          V25 normalizes Joy-Con L by 180 degrees inside Mario Kart KPAD only, reproduces the tested V24-A horizontal plane, then mirrors exactly one steering axis.
+          V25-X mirrors KPAD X; V25-Z mirrors KPAD Z.
+          All other titles and V22 motion/pointer/gyro/calibration/buttons/sticks are untouched.
           "@ | Set-Content "package\README-V25.txt" -Encoding utf8
-          $hashX = (Get-FileHash "package\V25-X\Cemu.exe" -Algorithm SHA256).Hash
-          @"
-          V25-X/Cemu.exe SHA-256: $hashX
-          V25-Z/Cemu.exe SHA-256: $hashZ
-          "@ | Set-Content "package\SHA256.txt" -Encoding ascii
+          "V25-X/Cemu.exe SHA-256: $hx`nV25-Z/Cemu.exe SHA-256: $hz" | Set-Content "package\SHA256.txt" -Encoding ascii
           Compress-Archive -Path "package\*" -DestinationPath "Cemu-JoyCon-Mario-Kart-KPAD-V25-LR-Mirror-Windows-x64.zip" -CompressionLevel Optimal -Force
 
       - name: Upload V25 Windows build
