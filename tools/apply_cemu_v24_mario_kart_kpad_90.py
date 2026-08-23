@@ -40,7 +40,7 @@ else:
 
 old = '''\t\tglm::vec3 acc;\n\t\tmotion_sample.getAccelerometer(&acc[0]);\n\t\tstatus.acc.x = acc.x;\n\t\tstatus.acc.y = acc.y;\n\t\tstatus.acc.z = acc.z;\n'''
 
-new = '''\t\tglm::vec3 acc;\n\t\tmotion_sample.getAccelerometer(&acc[0]);\n\n\t\t// Mario Kart 8 is the only title that receives this KPAD-only correction.\n\t\t// JP/USA/EUR base Title IDs are covered. MotionPlus must be OFF because\n\t\t// Mario Kart 8's Wii Remote path is the core accelerometer Wii Wheel path.\n\t\tconst uint64 foreground_title = CafeSystem::GetForegroundTitleId();\n\t\tconst bool is_mario_kart_8 =\n\t\t\tforeground_title == 0x000500001010EB00ULL ||\n\t\t\tforeground_title == 0x000500001010EC00ULL ||\n\t\t\tforeground_title == 0x000500001010ED00ULL;\n\t\tif (type() == Wiimote && !is_mpls_attached() && is_mario_kart_8)\n\t\t{\n''' + transform + '''\t\t}\n\n\t\tstatus.acc.x = acc.x;\n\t\tstatus.acc.y = acc.y;\n\t\tstatus.acc.z = acc.z;\n'''
+new = '''\t\tglm::vec3 acc;\n\t\tmotion_sample.getAccelerometer(&acc[0]);\n\n\t\t// Mario Kart 8 is the only title that receives this KPAD-only correction.\n\t\t// JP/USA/EUR are covered. Clear only the title-type byte so an update-form\n\t\t// foreground id still resolves to the same base game id.\n\t\tconst uint64 foreground_title = CafeSystem::GetForegroundTitleId();\n\t\tconst uint64 foreground_base_title = foreground_title & ~(0xFFULL << 32);\n\t\tconst bool is_mario_kart_8 =\n\t\t\tforeground_base_title == 0x000500001010EB00ULL ||\n\t\t\tforeground_base_title == 0x000500001010EC00ULL ||\n\t\t\tforeground_base_title == 0x000500001010ED00ULL;\n\t\tif (type() == Wiimote && !is_mpls_attached() && is_mario_kart_8)\n\t\t{\n''' + transform + '''\t\t}\n\n\t\tstatus.acc.x = acc.x;\n\t\tstatus.acc.y = acc.y;\n\t\tstatus.acc.z = acc.z;\n'''
 
 replace_once(
     wpad,
@@ -56,9 +56,9 @@ required = [
     marker,
     "status.accVertical.x = std::min(1.0f, std::abs(acc.x + acc.y));",
     "status.accVertical.y = std::min(std::max(-1.0f, -acc.z), 1.0f);",
-    "foreground_title == 0x000500001010EB00ULL",
-    "foreground_title == 0x000500001010EC00ULL",
-    "foreground_title == 0x000500001010ED00ULL",
+    "foreground_base_title == 0x000500001010EB00ULL",
+    "foreground_base_title == 0x000500001010EC00ULL",
+    "foreground_base_title == 0x000500001010ED00ULL",
     "type() == Wiimote && !is_mpls_attached() && is_mario_kart_8",
 ]
 for item in required:
