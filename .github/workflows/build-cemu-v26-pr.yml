@@ -1,0 +1,176 @@
+name: Build V26 Mario Kart Sideways Route Windows
+
+on:
+  pull_request:
+    branches: [v26-ci-base]
+    paths:
+      - "V26-CI-TRIGGER.txt"
+      - "tools/apply_cemu_v26_mario_kart_sideways_route.py"
+      - ".github/workflows/build-cemu-v26-pr.yml"
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_ROOT: "${{ github.workspace }}/cemu/dependencies/vcpkg"
+  VCPKG_BINARY_SOURCES: clear
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+  CEMU_COMMIT: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout wrapper
+        uses: actions/checkout@v6
+        with:
+          path: wrapper
+
+      - name: Checkout pinned Cemu
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+          path: cemu
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Apply V2 through V4
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_sideways.py cemu
+          python wrapper\tools\apply_cemu_v3_detection_fix.py cemu
+          python wrapper\tools\apply_cemu_v4_motion_osd.py cemu
+
+      - name: Apply V5 stage 1
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_pointer_orientation_fastforward.py cemu
+          $stage1Exit = $LASTEXITCODE
+          if ($stage1Exit -ne 0) { Write-Host "Expected legacy KPAD anchor reached; continuing." }
+          $global:LASTEXITCODE = 0
+
+      - name: Apply V5 through V8
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+          python wrapper\tools\apply_cemu_v6_input_coordinates_pointer.py cemu
+          python wrapper\tools\apply_cemu_v7_pointer_gyro_toggle.py cemu
+          python wrapper\tools\apply_cemu_v8_motion_pointer_calibration.py cemu
+          python wrapper\tools\apply_cemu_v8_postfix.py cemu
+          python wrapper\tools\apply_cemu_resizable_input_settings.py cemu
+
+      - name: Apply V9 through V14
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v9_precision_motion_pointer.py cemu
+          python wrapper\tools\apply_cemu_v10_dolphin_motion_core.py cemu
+          python wrapper\tools\apply_cemu_v10_dolphin_postfix.py cemu
+          python wrapper\tools\apply_cemu_v11_dolphin_wiimote_input.py cemu
+          python wrapper\tools\apply_cemu_v12_dolphin_motion_visualizer.py cemu
+          python wrapper\tools\apply_cemu_v13_exact_dolphin_motion_input.py cemu
+          python wrapper\tools\apply_cemu_v14_v9_game_motion.py cemu
+
+      - name: Reconstruct protected V25-Z then isolate V26
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v15_r_sideways_kpad_wheel.py cemu
+          python wrapper\tools\apply_cemu_v16_restore_v7_kpad_down.py cemu
+          python wrapper\tools\apply_cemu_v21_motion_stack.py cemu
+          python wrapper\tools\apply_cemu_v22_motion_basis_fix.py cemu
+          python wrapper\tools\apply_cemu_v25_mario_kart_lr_mirror.py cemu Z
+          git -C cemu diff --check
+
+          $wpad25 = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          foreach ($marker in @(
+            'V25-Z: single-axis steering mirror',
+            'acc.z = -acc.z;',
+            'type() == Wiimote && !is_mpls_attached() && is_mario_kart_8'
+          )) {
+            if (-not $wpad25.Contains($marker)) { throw "Protected V25-Z marker missing: $marker" }
+          }
+
+          function Get-SourceHashes {
+            $srcRoot = (Resolve-Path "cemu\src").Path
+            $map = @{}
+            Get-ChildItem $srcRoot -Recurse -File | ForEach-Object {
+              $rel = $_.FullName.Substring($srcRoot.Length + 1)
+              $map[$rel] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            }
+            return $map
+          }
+
+          $before = Get-SourceHashes
+          python wrapper\tools\apply_cemu_v26_mario_kart_sideways_route.py cemu
+          git -C cemu diff --check
+          $after = Get-SourceHashes
+          $changed = @($before.Keys | Where-Object { -not $after.ContainsKey($_) -or $before[$_] -ne $after[$_] })
+          $expected = "input\emulated\WPADController.cpp"
+          if ($changed.Count -ne 1 -or $changed[0] -ne $expected) {
+            throw "V26 isolation failure. Expected only $expected; changed: $($changed -join ', ')"
+          }
+
+          $wpad26 = Get-Content "cemu\src\input\emulated\WPADController.cpp" -Raw
+          foreach ($marker in @(
+            'V26: V25-Z is hardware-approved when the controller setting is Vertical.',
+            'std::dynamic_pointer_cast<SDLController>(source_controller)',
+            'SDLController::JoyConOrientation::Sideways',
+            'if (joycon_sideways && !joycon_vertical)',
+            '// L: V22 Sideways -> V22 Vertical = +90 around KPAD Y.',
+            '// R: V22 Sideways -> V22 Vertical = -90 around KPAD Y.',
+            'V25-Z: single-axis steering mirror'
+          )) {
+            if (-not $wpad26.Contains($marker)) { throw "V26 marker missing: $marker" }
+          }
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Configure Cemu Release
+        shell: pwsh
+        run: cmake -S cemu -B cemu/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build V26 Release
+        shell: pwsh
+        run: cmake --build cemu/build --config release
+
+      - name: Package V26
+        shell: pwsh
+        run: |
+          $exe = "cemu\bin\Cemu_release.exe"
+          if (-not (Test-Path $exe)) { throw "V26 Cemu executable was not produced" }
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe "package\Cemu.exe" -Force
+          $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
+          "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
+          @"
+          Cemu Joy-Con Mario Kart V26
+          ============================
+          Hardware-approved runtime base: V25-Z on V22.
+
+          V26 changes only Mario Kart 8 KPAD routing when the Joy-Con is selected Sideways.
+          It converts V22 Sideways input into the exact V22 Vertical basis that V25-Z was
+          hardware-tested at 100%, then leaves all V25-Z L/R normalization and Z mirror
+          math unchanged. Vertical remains the proven V25-Z behavior.
+
+          MotionPlus: OFF.
+          Expected final use: select Sideways and hold both Joy-Cons naturally as wheels.
+          Mario Party and every non-Mario-Kart path remain on V22 behavior.
+          "@ | Set-Content "package\README-V26.txt" -Encoding utf8
+          Compress-Archive -Path "package\*" -DestinationPath "Cemu-JoyCon-Mario-Kart-V26-Sideways-Windows-x64.zip" -CompressionLevel Optimal -Force
+          Write-Host "V26 Cemu.exe SHA-256: $hash"
+
+      - name: Upload V26 Windows build
+        uses: actions/upload-artifact@v6
+        with:
+          name: Cemu-JoyCon-Mario-Kart-V26-Sideways-Windows-x64
+          path: Cemu-JoyCon-Mario-Kart-V26-Sideways-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
