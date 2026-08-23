@@ -1,0 +1,1 @@
+Retrigger isolated V25 Mario Kart Joy-Con L/R KPAD mirror build after CI quoting fix.
