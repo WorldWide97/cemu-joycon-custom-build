@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/build-melonds-dualsense-touch-v1.yml"
       - "tools/apply_melonds_dualsense_touch_v1.py"
+      - "tools/apply_melonds_dualsense_touch_v1_tapdown.py"
 
 permissions:
   contents: read
@@ -37,10 +38,11 @@ jobs:
           path: melonDS
           fetch-depth: 1
 
-      - name: Apply per-instance DualSense touchpad patch
+      - name: Apply strict per-instance DualSense DS stylus patch
         shell: pwsh
         run: |
           python wrapper\tools\apply_melonds_dualsense_touch_v1.py melonDS
+          python wrapper\tools\apply_melonds_dualsense_touch_v1_tapdown.py melonDS
           git -C melonDS diff --check
 
           $input = Get-Content "melonDS\src\frontend\qt_sdl\EmuInstanceInput.cpp" -Raw
@@ -52,18 +54,28 @@ jobs:
             "SDL_GameControllerGetTouchpadFinger(controller, 0, 0",
             "touchpadTouching = true",
             "touchpadX = static_cast<melonDS::u16>",
-            "touchpadY = static_cast<melonDS::u16>"
+            "touchpadY = static_cast<melonDS::u16>",
+            "touchpadTapX.store(x",
+            "touchpadTapY.store(y",
+            "touchpadTapX.load",
+            "touchpadTapY.load"
           )) {
             if (-not $input.Contains($marker)) { throw "Missing input marker: $marker" }
           }
-          foreach ($marker in @("bool touchpadTouching", "touchpadX, touchpadY")) {
+          foreach ($marker in @(
+            "bool touchpadTouching",
+            "touchpadX, touchpadY",
+            "touchpadTapX",
+            "touchpadTapY"
+          )) {
             if (-not $header.Contains($marker)) { throw "Missing header marker: $marker" }
           }
-          if (-not $thread.Contains("if (emuInstance->touchpadTouching)")) { throw "Touchpad dispatch missing" }
+          if (-not $thread.Contains("if (emuInstance->touchpadAvailable)")) { throw "Exclusive touchpad dispatch missing" }
+          if (-not $thread.Contains("emuInstance->nds->TouchScreen(emuInstance->touchpadX, emuInstance->touchpadY)")) { throw "Native DS stylus dispatch missing" }
           foreach ($marker in @("SDL_JOYSTICK_HIDAPI_PS5", "DualSense Touch Edition V1")) {
             if (-not $main.Contains($marker)) { throw "Missing main marker: $marker" }
           }
-          Write-Host "Source invariants verified."
+          Write-Host "Strict 1:1 stylus source invariants verified."
 
       - name: Restore vcpkg cache
         uses: actions/cache/restore@v4
@@ -103,29 +115,42 @@ jobs:
           Copy-Item $exe "package\melonDS-DualSense-Touch.exe" -Force
 
           @"
-          melonDS DualSense Touch Edition V1
-          ==================================
+          melonDS DualSense Touch Edition V1 - STRICT DS STYLUS
+          ======================================================
           Upstream melonDS commit: $env:MELONDS_COMMIT (Nightly 2026-08-23)
 
-          CUSTOM INPUT:
-          - DualSense / DualShock touchpad maps absolutely 1:1 to DS touchscreen (256x192).
-          - Finger down = DS stylus down; finger movement = drag; finger lift = immediate stylus up.
-          - Each melonDS instance reads the touchpad from ITS OWN selected controller.
-          - Existing mouse touchscreen input remains available when no controller finger is down.
-          - PlayStation SDL HIDAPI is forced on for USB/Bluetooth extra HID features.
+          STRICT TOUCH MODEL:
+          - The selected DualSense / DualShock touchpad IS the complete DS touchscreen surface.
+          - Full physical touchpad X maps absolutely to DS X=0..255.
+          - Full physical touchpad Y maps absolutely to DS Y=0..191.
+          - Finger contact = DS stylus down immediately; no touchpad click is required.
+          - Finger movement while touching = continuous DS stylus drag/draw.
+          - Finger hold = stylus remains down at that coordinate.
+          - Finger lift = stylus release on the next native input step.
+          - Ultra-fast DOWN->UP taps are event-latched so they are not lost between emulator polls.
+          - The exact DOWN coordinate is preserved independently from later MOTION/UP coordinates.
+          - Finger 0 is used, matching the DS single-contact stylus model.
+          - No mouse cursor, no relative movement, no acceleration and no dead-zone are used.
+          - When the selected controller exposes a touchpad, it is the EXCLUSIVE DS stylus source for that instance.
+          - Each melonDS instance binds touch to ITS OWN selected controller.
+          - PlayStation SDL HIDAPI is forced on for supported USB/Bluetooth extra HID features.
 
           FOUR PLAYER SETUP:
           - Create/open four melonDS instances as usual.
           - In each instance Input and hotkeys dialog, select that player's DualSense controller.
           - Instance 1 -> DualSense 1, Instance 2 -> DualSense 2, etc.
-          - The selected controller's touchpad controls only that instance's DS lower screen.
+          - Each selected controller's touchpad drives only that instance's DS lower screen.
 
           RECOMMENDED MARIO PARTY DS VIDEO:
           - 3D Renderer: OpenGL Compute Shader
           - Internal resolution: start at 4x; use 3x if four-instance performance needs headroom.
           - High Resolution Coordinates: ON
           - JIT: ON
-          - Keep frame limiter enabled for full-speed 60 FPS synchronization.
+          - Keep frame limiter enabled for full-speed synchronization.
+
+          VERIFICATION LIMIT:
+          - CI verifies source invariants, Windows x64 compilation, executable marker, packaging and SHA-256.
+          - Physical USB/Bluetooth behavior with four real DualSense controllers requires hardware testing on the target PC.
 
           NOTE:
           This is a GPLv3 custom build derived from melonDS. It intentionally does not include ROMs,
