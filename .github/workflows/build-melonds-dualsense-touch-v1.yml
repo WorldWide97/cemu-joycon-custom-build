@@ -1,0 +1,156 @@
+name: Build melonDS DualSense Touch V1
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [melonds-dualsense-touch-v1]
+    paths:
+      - ".github/workflows/build-melonds-dualsense-touch-v1.yml"
+      - "tools/apply_melonds_dualsense_touch_v1.py"
+
+permissions:
+  contents: read
+
+env:
+  MELONDS_COMMIT: 906e9ebb27da8c6a715cd7abab4abfe8a8d29427
+  MELONDS_GIT_BRANCH: custom/dualsense-touch-v1
+  MELONDS_GIT_HASH: 906e9ebb27da8c6a715cd7abab4abfe8a8d29427
+  MELONDS_BUILD_PROVIDER: WorldWide97 GitHub Actions
+  VCPKG_BINARY_SOURCES: clear
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout custom patch repository
+        uses: actions/checkout@v6
+        with:
+          path: wrapper
+
+      - name: Checkout pinned melonDS nightly source
+        uses: actions/checkout@v6
+        with:
+          repository: melonDS-emu/melonDS
+          ref: 906e9ebb27da8c6a715cd7abab4abfe8a8d29427
+          path: melonDS
+          fetch-depth: 1
+
+      - name: Apply per-instance DualSense touchpad patch
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_melonds_dualsense_touch_v1.py melonDS
+          git -C melonDS diff --check
+
+          $input = Get-Content "melonDS\src\frontend\qt_sdl\EmuInstanceInput.cpp" -Raw
+          $header = Get-Content "melonDS\src\frontend\qt_sdl\EmuInstance.h" -Raw
+          $thread = Get-Content "melonDS\src\frontend\qt_sdl\EmuThread.cpp" -Raw
+          $main = Get-Content "melonDS\src\frontend\qt_sdl\main.cpp" -Raw
+
+          foreach ($marker in @(
+            "SDL_GameControllerGetTouchpadFinger(controller, 0, 0",
+            "touchpadTouching = true",
+            "touchpadX = static_cast<melonDS::u16>",
+            "touchpadY = static_cast<melonDS::u16>"
+          )) {
+            if (-not $input.Contains($marker)) { throw "Missing input marker: $marker" }
+          }
+          foreach ($marker in @("bool touchpadTouching", "touchpadX, touchpadY")) {
+            if (-not $header.Contains($marker)) { throw "Missing header marker: $marker" }
+          }
+          if (-not $thread.Contains("if (emuInstance->touchpadTouching)")) { throw "Touchpad dispatch missing" }
+          foreach ($marker in @("SDL_JOYSTICK_HIDAPI_PS5", "DualSense Touch Edition V1")) {
+            if (-not $main.Contains($marker)) { throw "Missing main marker: $marker" }
+          }
+          Write-Host "Source invariants verified."
+
+      - name: Restore vcpkg cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: melonds-vcpkg-x86_64-windows-${{ hashFiles('melonDS/vcpkg.json') }}
+          restore-keys: melonds-vcpkg-x86_64-windows-
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: '${{ github.workspace }}/melonDS/vcpkg.json'
+
+      - name: Configure and build melonDS Release x64
+        shell: pwsh
+        run: |
+          Push-Location melonDS
+          cmake --preset release-windows-x86_64 -DENABLE_DEBUG_DEPS=OFF -DMELONDS_EMBED_BUILD_INFO=ON
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+          cmake --build --preset release-windows-x86_64
+          if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
+          Pop-Location
+
+      - name: Verify and package custom build
+        shell: pwsh
+        run: |
+          $exe = "melonDS\build\release-windows-x86_64\melonDS.exe"
+          if (-not (Test-Path $exe)) { throw "Expected $exe was not produced" }
+
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          if (-not $ascii.Contains("DualSense Touch Edition V1")) {
+            throw "Custom build marker not present in compiled executable"
+          }
+
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe "package\melonDS-DualSense-Touch.exe" -Force
+
+          @"
+          melonDS DualSense Touch Edition V1
+          ==================================
+          Upstream melonDS commit: $env:MELONDS_COMMIT (Nightly 2026-08-23)
+
+          CUSTOM INPUT:
+          - DualSense / DualShock touchpad maps absolutely 1:1 to DS touchscreen (256x192).
+          - Finger down = DS stylus down; finger movement = drag; finger lift = immediate stylus up.
+          - Each melonDS instance reads the touchpad from ITS OWN selected controller.
+          - Existing mouse touchscreen input remains available when no controller finger is down.
+          - PlayStation SDL HIDAPI is forced on for USB/Bluetooth extra HID features.
+
+          FOUR PLAYER SETUP:
+          - Create/open four melonDS instances as usual.
+          - In each instance Input and hotkeys dialog, select that player's DualSense controller.
+          - Instance 1 -> DualSense 1, Instance 2 -> DualSense 2, etc.
+          - The selected controller's touchpad controls only that instance's DS lower screen.
+
+          RECOMMENDED MARIO PARTY DS VIDEO:
+          - 3D Renderer: OpenGL Compute Shader
+          - Internal resolution: start at 4x; use 3x if four-instance performance needs headroom.
+          - High Resolution Coordinates: ON
+          - JIT: ON
+          - Keep frame limiter enabled for full-speed 60 FPS synchronization.
+
+          NOTE:
+          This is a GPLv3 custom build derived from melonDS. It intentionally does not include ROMs,
+          Nintendo BIOS/firmware, keys, saves, or other copyrighted game/system files.
+          "@ | Set-Content "package\README-DualSense-Touch-V1.txt" -Encoding utf8
+
+          $hash = (Get-FileHash "package\melonDS-DualSense-Touch.exe" -Algorithm SHA256).Hash
+          "melonDS-DualSense-Touch.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
+
+          $zip = "melonDS-DualSense-Touch-V1-Windows-x64.zip"
+          Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          if (-not (Test-Path $zip)) { throw "Final custom ZIP was not produced" }
+          Write-Host "Custom melonDS SHA-256: $hash"
+
+      - name: Upload Windows custom build
+        uses: actions/upload-artifact@v6
+        with:
+          name: melonDS-DualSense-Touch-V1-Windows-x64
+          path: melonDS-DualSense-Touch-V1-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Save vcpkg cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: melonds-vcpkg-x86_64-windows-${{ hashFiles('melonDS/vcpkg.json') }}
