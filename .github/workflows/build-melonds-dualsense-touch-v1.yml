@@ -75,7 +75,7 @@ jobs:
       - name: Set up vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgJsonGlob: '${{ github.workspace }}/melonDS/vcpkg.json'
+          vcpkgJsonGlob: 'melonDS/vcpkg.json'
 
       - name: Configure and build melonDS Release x64
         shell: pwsh
