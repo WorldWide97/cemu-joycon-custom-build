@@ -45,14 +45,13 @@ jobs:
       - name: Replace historical vcpkg toolchain
         shell: pwsh
         run: |
-          # Cemu source and its vcpkg.json stay untouched. Only the vcpkg tool/scripts
-          # are replaced so deleted 2024 MSYS2 mirror packages do not block the bisect.
+          # Keep the historical Cemu source/vcpkg.json untouched. Replace only the
+          # vcpkg tool/scripts, using a FULL clone so all historical port/version
+          # git objects are local and vcpkg does not need a promisor fetch later.
           Remove-Item -Recurse -Force cemu\dependencies\vcpkg
-          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git cemu\dependencies\vcpkg
+          git clone https://github.com/microsoft/vcpkg.git cemu\dependencies\vcpkg
           git -C cemu\dependencies\vcpkg checkout 2026.07.29
-          # Cemu 2.0-88/89 pins this exact package baseline in vcpkg.json.
-          # Keep it available so dependency versions remain the historical ones.
-          git -C cemu\dependencies\vcpkg fetch origin a4275b7eee79fb24ec2e135481ef5fce8b41c339
+          git -C cemu\dependencies\vcpkg cat-file -e a4275b7eee79fb24ec2e135481ef5fce8b41c339^{commit}
           git -C cemu\dependencies\vcpkg rev-parse HEAD
           Get-Content cemu\vcpkg.json | Select-String "builtin-baseline"
 
@@ -90,8 +89,8 @@ jobs:
           POST-1257 is the H264 async-decoding commit itself (#1257).
 
           Historical Cemu source is unchanged. A modern vcpkg toolchain is used only
-          to replace deleted external package-download infrastructure while keeping
-          the historical builtin-baseline from vcpkg.json.
+          to work around obsolete external build infrastructure while the historical
+          builtin-baseline in vcpkg.json remains unchanged.
 
           Test only: launch Wii Party U and select the same game/mode that crashes.
           "@ | Set-Content "package\README-BISECT.txt" -Encoding utf8
