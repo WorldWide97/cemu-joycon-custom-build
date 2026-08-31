@@ -1,0 +1,89 @@
+name: Build V29 Wii Party U Regression Bisect
+
+on:
+  push:
+    branches: [wii-party-u-bisect-v29]
+    paths:
+      - ".github/workflows/build-cemu-v29-wii-party-u-bisect.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_BINARY_SOURCES: clear
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+
+jobs:
+  build-windows-x64:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: PRE-1257
+            ref: 4b9c7c0d307495c679127381d6f00bab9f0c2933
+          - label: POST-1257
+            ref: f1685eab665e1b262b47d6ea0c47d691fcc0f4a6
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout wrapper
+        uses: actions/checkout@v6
+        with:
+          ref: wii-party-u-bisect-v29
+          path: wrapper
+
+      - name: Checkout Cemu snapshot
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: ${{ matrix.ref }}
+          path: cemu
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Configure Cemu Release
+        shell: pwsh
+        run: cmake -S cemu -B cemu/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build Cemu Release
+        shell: pwsh
+        run: cmake --build cemu/build --config release
+
+      - name: Package snapshot
+        shell: pwsh
+        run: |
+          $exe = "cemu\bin\Cemu_release.exe"
+          if (-not (Test-Path $exe)) { throw "Expected Cemu executable was not produced" }
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe "package\Cemu.exe" -Force
+          @"
+          Wii Party U regression bisect snapshot
+          ======================================
+          Label: ${{ matrix.label }}
+          Cemu commit: ${{ matrix.ref }}
+
+          PRE-1257 is the commit immediately before the H264 async-decoding change.
+          POST-1257 is the H264 async-decoding commit itself (#1257).
+
+          Test only: launch Wii Party U and select the same game/mode that crashes.
+          "@ | Set-Content "package\README-BISECT.txt" -Encoding utf8
+          $zip = "Cemu-WiiPartyU-Bisect-${{ matrix.label }}-${{ matrix.ref }}-Windows-x64.zip"
+          Compress-Archive -Path "package\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+
+      - name: Upload snapshot
+        uses: actions/upload-artifact@v6
+        with:
+          name: Cemu-WiiPartyU-Bisect-${{ matrix.label }}
+          path: Cemu-WiiPartyU-Bisect-${{ matrix.label }}-${{ matrix.ref }}-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
