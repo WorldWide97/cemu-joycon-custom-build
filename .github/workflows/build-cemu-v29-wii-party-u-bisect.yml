@@ -40,7 +40,18 @@ jobs:
           ref: ${{ matrix.ref }}
           path: cemu
           submodules: recursive
-          fetch-depth: 1
+          fetch-depth: 0
+
+      - name: Ensure full vcpkg history
+        shell: pwsh
+        run: |
+          $isShallow = git -C cemu\dependencies\vcpkg rev-parse --is-shallow-repository
+          if ($isShallow.Trim() -eq "true") {
+            git -C cemu\dependencies\vcpkg fetch --unshallow --tags
+          } else {
+            git -C cemu\dependencies\vcpkg fetch --tags
+          }
+          git -C cemu\dependencies\vcpkg rev-parse HEAD
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
