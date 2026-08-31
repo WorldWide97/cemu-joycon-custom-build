@@ -51,7 +51,8 @@ jobs:
           Remove-Item -Recurse -Force cemu\dependencies\vcpkg
           git clone https://github.com/microsoft/vcpkg.git cemu\dependencies\vcpkg
           git -C cemu\dependencies\vcpkg checkout 2026.07.29
-          git -C cemu\dependencies\vcpkg cat-file -e a4275b7eee79fb24ec2e135481ef5fce8b41c339^{commit}
+          $baseline = "a4275b7eee79fb24ec2e135481ef5fce8b41c339"
+          git -C cemu\dependencies\vcpkg rev-parse $baseline
           git -C cemu\dependencies\vcpkg rev-parse HEAD
           Get-Content cemu\vcpkg.json | Select-String "builtin-baseline"
 
