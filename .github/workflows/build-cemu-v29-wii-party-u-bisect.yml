@@ -40,7 +40,7 @@ jobs:
           ref: ${{ matrix.ref }}
           path: cemu
           submodules: recursive
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Ensure full vcpkg history
         shell: pwsh
