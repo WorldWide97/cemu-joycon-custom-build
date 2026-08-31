@@ -42,16 +42,19 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Ensure full vcpkg history
+      - name: Replace historical vcpkg toolchain
         shell: pwsh
         run: |
-          $isShallow = git -C cemu\dependencies\vcpkg rev-parse --is-shallow-repository
-          if ($isShallow.Trim() -eq "true") {
-            git -C cemu\dependencies\vcpkg fetch --unshallow --tags
-          } else {
-            git -C cemu\dependencies\vcpkg fetch --tags
-          }
+          # Cemu source and its vcpkg.json stay untouched. Only the vcpkg tool/scripts
+          # are replaced so deleted 2024 MSYS2 mirror packages do not block the bisect.
+          Remove-Item -Recurse -Force cemu\dependencies\vcpkg
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git cemu\dependencies\vcpkg
+          git -C cemu\dependencies\vcpkg checkout 2026.07.29
+          # Cemu 2.0-88/89 pins this exact package baseline in vcpkg.json.
+          # Keep it available so dependency versions remain the historical ones.
+          git -C cemu\dependencies\vcpkg fetch origin a4275b7eee79fb24ec2e135481ef5fce8b41c339
           git -C cemu\dependencies\vcpkg rev-parse HEAD
+          Get-Content cemu\vcpkg.json | Select-String "builtin-baseline"
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -60,7 +63,7 @@ jobs:
 
       - name: Bootstrap vcpkg
         shell: pwsh
-        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat
+        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Configure Cemu Release
         shell: pwsh
@@ -85,6 +88,10 @@ jobs:
 
           PRE-1257 is the commit immediately before the H264 async-decoding change.
           POST-1257 is the H264 async-decoding commit itself (#1257).
+
+          Historical Cemu source is unchanged. A modern vcpkg toolchain is used only
+          to replace deleted external package-download infrastructure while keeping
+          the historical builtin-baseline from vcpkg.json.
 
           Test only: launch Wii Party U and select the same game/mode that crashes.
           "@ | Set-Content "package\README-BISECT.txt" -Encoding utf8
