@@ -98,6 +98,14 @@ jobs:
             src/Cafe/OS/libs/coreinit/coreinit_SysHeap.cpp `
             src/Cafe/OS/libs/coreinit/coreinit_SysHeap.h
 
+          # Verify exact PRE snapshots before adding the minimal modern module bridge.
+          $h264Blob = (git -C cemu hash-object src/Cafe/OS/libs/h264_avc/H264Dec.cpp).Trim()
+          if ($h264Blob -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "Unexpected PRE H264Dec blob: $h264Blob" }
+          $heapCppBlob = (git -C cemu hash-object src/Cafe/OS/libs/coreinit/coreinit_SysHeap.cpp).Trim()
+          if ($heapCppBlob -ne "e37949d7784c75dc5c0f7d6c441e3351ee5bcf34") { throw "Unexpected PRE SysHeap.cpp blob: $heapCppBlob" }
+          $heapHBlob = (git -C cemu hash-object src/Cafe/OS/libs/coreinit/coreinit_SysHeap.h).Trim()
+          if ($heapHBlob -ne "428224af28200e14c9bbce0b8483447b094af7bc") { throw "Unexpected PRE SysHeap.h blob: $heapHBlob" }
+
           # Files added by #1257 must not remain in the effective source tree.
           Remove-Item -Force -ErrorAction SilentlyContinue "cemu\src\Cafe\OS\libs\h264_avc\H264DecBackendAVC.cpp"
           Remove-Item -Force -ErrorAction SilentlyContinue "cemu\src\Cafe\OS\libs\h264_avc\H264DecInternal.h"
@@ -106,12 +114,9 @@ jobs:
           # two #1257 backend entries from Cafe/CMakeLists.txt.
           python wrapper\tools\apply_cemu_v28_legacy_h264_cmake.py cemu
 
-          $h264Blob = (git -C cemu hash-object src/Cafe/OS/libs/h264_avc/H264Dec.cpp).Trim()
-          if ($h264Blob -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "Unexpected PRE H264Dec blob: $h264Blob" }
-          $heapCppBlob = (git -C cemu hash-object src/Cafe/OS/libs/coreinit/coreinit_SysHeap.cpp).Trim()
-          if ($heapCppBlob -ne "e37949d7784c75dc5c0f7d6c441e3351ee5bcf34") { throw "Unexpected PRE SysHeap.cpp blob: $heapCppBlob" }
-          $heapHBlob = (git -C cemu hash-object src/Cafe/OS/libs/coreinit/coreinit_SysHeap.h).Trim()
-          if ($heapHBlob -ne "428224af28200e14c9bbce0b8483447b094af7bc") { throw "Unexpected PRE SysHeap.h blob: $heapHBlob" }
+          $h264 = Get-Content "cemu\src\Cafe\OS\libs\h264_avc\H264Dec.cpp" -Raw
+          if (-not $h264.Contains("V28 compatibility bridge")) { throw "Modern COSModule bridge missing" }
+          if ($h264.Contains("QueueForDecode")) { throw "Post-1257 async queue leaked into V31" }
 
           if (Test-Path "cemu\src\Cafe\OS\libs\h264_avc\H264DecBackendAVC.cpp") { throw "#1257 backend cpp still exists" }
           if (Test-Path "cemu\src\Cafe\OS\libs\h264_avc\H264DecInternal.h") { throw "#1257 internal header still exists" }
