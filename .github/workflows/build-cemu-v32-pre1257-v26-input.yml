@@ -1,0 +1,161 @@
+name: Build V32 PRE-1257 + V26 Input Windows
+
+on:
+  push:
+    branches: [wii-party-u-v32-pre1257-v26-input]
+    paths:
+      - ".github/workflows/build-cemu-v32-pre1257-v26-input.yml"
+      - "tools/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_BINARY_SOURCES: clear
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+  PRE1257_COMMIT: 4b9c7c0d307495c679127381d6f00bab9f0c2933
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout wrapper V32
+        uses: actions/checkout@v6
+        with:
+          ref: wii-party-u-v32-pre1257-v26-input
+          path: wrapper
+
+      - name: Checkout exact PRE-1257 Cemu
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: 4b9c7c0d307495c679127381d6f00bab9f0c2933
+          path: cemu
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify exact Wii Party U known-good base
+        shell: pwsh
+        run: |
+          $head = (git -C cemu rev-parse HEAD).Trim()
+          if ($head -ne $env:PRE1257_COMMIT) { throw "Wrong Cemu base: $head" }
+          $h264 = (git -C cemu hash-object src/Cafe/OS/libs/h264_avc/H264Dec.cpp).Trim()
+          if ($h264 -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "PRE H264 mismatch: $h264" }
+          Write-Host "Exact PRE-1257 base verified: $head"
+
+      - name: Apply V2 through V4
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_sideways.py cemu
+          python wrapper\tools\apply_cemu_v3_detection_fix.py cemu
+          python wrapper\tools\apply_cemu_v4_motion_osd.py cemu
+
+      - name: Apply V5 stage 1
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_pointer_orientation_fastforward.py cemu
+          $stage1Exit = $LASTEXITCODE
+          if ($stage1Exit -ne 0) { Write-Host "Expected legacy KPAD anchor reached; continuing." }
+          $global:LASTEXITCODE = 0
+
+      - name: Apply V5 through V8
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v5_stage2_pointer_kpad_fastforward.py cemu
+          python wrapper\tools\apply_cemu_v6_input_coordinates_pointer.py cemu
+          python wrapper\tools\apply_cemu_v7_pointer_gyro_toggle.py cemu
+          python wrapper\tools\apply_cemu_v8_motion_pointer_calibration.py cemu
+          python wrapper\tools\apply_cemu_v8_postfix.py cemu
+          python wrapper\tools\apply_cemu_resizable_input_settings.py cemu
+
+      - name: Apply V9 through V14
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v9_precision_motion_pointer.py cemu
+          python wrapper\tools\apply_cemu_v10_dolphin_motion_core.py cemu
+          python wrapper\tools\apply_cemu_v10_dolphin_postfix.py cemu
+          python wrapper\tools\apply_cemu_v11_dolphin_wiimote_input.py cemu
+          python wrapper\tools\apply_cemu_v12_dolphin_motion_visualizer.py cemu
+          python wrapper\tools\apply_cemu_v13_exact_dolphin_motion_input.py cemu
+          python wrapper\tools\apply_cemu_v14_v9_game_motion.py cemu
+
+      - name: Apply hardware-approved V22 V25-Z and V26
+        shell: pwsh
+        run: |
+          python wrapper\tools\apply_cemu_v15_r_sideways_kpad_wheel.py cemu
+          python wrapper\tools\apply_cemu_v16_restore_v7_kpad_down.py cemu
+          python wrapper\tools\apply_cemu_v21_motion_stack.py cemu
+          python wrapper\tools\apply_cemu_v22_motion_basis_fix.py cemu
+          python wrapper\tools\apply_cemu_v25_mario_kart_lr_mirror.py cemu Z
+          python wrapper\tools\apply_cemu_v26_mario_kart_shortcut_semantics.py cemu
+          git -C cemu diff --check
+
+      - name: Verify Wii Party U core stayed PRE-1257
+        shell: pwsh
+        run: |
+          $h264 = (git -C cemu hash-object src/Cafe/OS/libs/h264_avc/H264Dec.cpp).Trim()
+          if ($h264 -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "Input patches touched PRE H264 core: $h264" }
+          if (Test-Path "cemu\src\Cafe\OS\libs\h264_avc\H264DecBackendAVC.cpp") { throw "Post-1257 H264 backend unexpectedly exists" }
+          if (Test-Path "cemu\src\Cafe\OS\libs\h264_avc\H264DecInternal.h") { throw "Post-1257 H264 internal header unexpectedly exists" }
+          Write-Host "PRE-1257 Wii Party U core preserved after V26 input patches."
+
+      - name: Replace historical vcpkg toolchain only
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force cemu\dependencies\vcpkg
+          git clone https://github.com/microsoft/vcpkg.git cemu\dependencies\vcpkg
+          git -C cemu\dependencies\vcpkg checkout 2026.07.29
+          $baseline = "a4275b7eee79fb24ec2e135481ef5fce8b41c339"
+          git -C cemu\dependencies\vcpkg rev-parse $baseline
+          Get-Content cemu\vcpkg.json | Select-String "builtin-baseline"
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Configure Cemu Release
+        shell: pwsh
+        run: cmake -S cemu -B cemu/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build V32 Release
+        shell: pwsh
+        run: cmake --build cemu/build --config release
+
+      - name: Package V32
+        shell: pwsh
+        run: |
+          $exe = "cemu\bin\Cemu_release.exe"
+          if (-not (Test-Path $exe)) { throw "V32 Cemu executable was not produced" }
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe "package\Cemu.exe" -Force
+          @"
+          Cemu V32 - PRE-1257 Core + V26 Joy-Con Input Stack
+          ===================================================
+          Cemu core: exact 4b9c7c0d307495c679127381d6f00bab9f0c2933
+          This is the exact PRE-1257 snapshot proven by hardware testing to run
+          Wii Party U correctly, with the V26 Joy-Con/motion/pointer/Mario Kart
+          input patch stack applied on top.
+
+          IMPORTANT: test by replacing only Cemu.exe inside the existing V26
+          portable folder so controller profiles, mlc01, game paths and settings
+          remain unchanged.
+          "@ | Set-Content "package\README-V32.txt" -Encoding utf8
+          $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
+          "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
+          Compress-Archive -Path "package\*" -DestinationPath "Cemu-V32-PRE1257-V26-Input-Windows-x64.zip" -CompressionLevel Optimal -Force
+          Write-Host "V32 SHA-256: $hash"
+
+      - name: Upload V32 Windows build
+        uses: actions/upload-artifact@v6
+        with:
+          name: Cemu-V32-PRE1257-V26-Input-Windows-x64
+          path: Cemu-V32-PRE1257-V26-Input-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
