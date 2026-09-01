@@ -68,8 +68,11 @@ def adapt_sdl_controller_cpp(snapshot: Path, cemu: Path) -> None:
     text = (snapshot / rel).read_text(encoding="utf-8")
 
     replacements = [
-        ("SDL_GUID", "SDL_JoystickGUID"),
+        # Adapt the full SDL3 helper name before the generic SDL_GUID type
+        # replacement. Otherwise SDL_GUIDToString becomes the nonexistent
+        # SDL_JoystickGUIDToString and no longer matches this rule.
         ("SDL_GUIDToString", "SDL_JoystickGetGUIDString"),
+        ("SDL_GUID", "SDL_JoystickGUID"),
         ("SDL_CloseGamepad", "SDL_GameControllerClose"),
         ("SDL_GetGamepadType", "SDL_GameControllerGetType"),
         ("SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT", "SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT"),
@@ -162,7 +165,14 @@ def adapt_sdl_controller_cpp(snapshot: Path, cemu: Path) -> None:
     text = text.replace("m_has_rumble = SDL_GameControllerRumble(m_controller, 0, 0, 0);",
                         "m_has_rumble = SDL_GameControllerRumble(m_controller, 0, 0, 0) == 0;")
 
-    bad = ["SDL3/", "SDL_GUID", "SDL_GAMEPAD_", "SDL_OpenGamepad", "SDL_GetGamepads"]
+    bad = [
+        "SDL3/",
+        "SDL_GUID",
+        "SDL_GAMEPAD_",
+        "SDL_OpenGamepad",
+        "SDL_GetGamepads",
+        "SDL_JoystickGUIDToString",
+    ]
     for token in bad:
         if token in text:
             raise RuntimeError(f"Unadapted SDL3 token in SDLController.cpp: {token}")
