@@ -1,4 +1,4 @@
-name: Build V33 PRE-1257 + V26 Runtime Backport
+name: Build V33 PRE-1257 + V26 Joy-Con Backport
 
 on:
   push:
@@ -46,16 +46,16 @@ jobs:
           if ($h264 -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "PRE H264 mismatch: $h264" }
           Write-Host "Exact PRE-1257 base verified: $head"
 
-      - name: Generate manual V26 runtime backport for PRE SDL2
+      - name: Generate manual V26 runtime and settings backport for PRE SDL2
         shell: pwsh
         run: |
-          python wrapper\tools\apply_cemu_v33_pre1257_v26_runtime.py cemu --wrapper wrapper
+          python wrapper\tools\apply_cemu_v33_pre1257_v26_runtime.py cemu --wrapper wrapper --with-gui
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "--- V33 RUNTIME BACKPORT DIFF ---"
           git -C cemu status --short
           git -C cemu diff --check
 
-      - name: Verify V26 runtime core and isolation
+      - name: Verify V26 runtime, settings UI, and isolation
         shell: pwsh
         run: |
           $required = @(
@@ -66,7 +66,10 @@ jobs:
             "src/input/emulated/WPADController.cpp",
             "src/input/emulated/WPADController.h",
             "src/input/motion/Mahony.h",
-            "src/input/motion/MotionHandler.h"
+            "src/input/motion/MotionHandler.h",
+            "src/gui/input/InputSettings2.cpp",
+            "src/gui/input/panels/WiimoteInputPanel.cpp",
+            "src/gui/input/panels/WiimoteInputPanel.h"
           )
           $changed = @(git -C cemu diff --name-only HEAD)
           foreach ($file in $required) {
@@ -79,13 +82,19 @@ jobs:
           $provider = Get-Content cemu\src\input\api\SDL\SDLControllerProvider.cpp -Raw
           $controller = Get-Content cemu\src\input\api\SDL\SDLController.cpp -Raw
           $wpad = Get-Content cemu\src\input\emulated\WPADController.cpp -Raw
+          $inputSettings = Get-Content cemu\src\gui\input\InputSettings2.cpp -Raw
+          $wiimotePanel = Get-Content cemu\src\gui\input\panels\WiimoteInputPanel.cpp -Raw
           if ($provider -notmatch "dolphin_pointer_motion") { throw "V26 pointer provider missing" }
           if ($provider -notmatch "processCalibratedMotionSample") { throw "V26 calibrated Joy-Con path missing" }
           if ($controller -notmatch "joycon_pointer_calibration_period_s") { throw "V26 profile compatibility missing" }
           if ($controller -notmatch "V26: V5's legacy hotkey swap") { throw "V26 hotkey semantics missing" }
           if ($wpad -notmatch "update_joycon_pointer") { throw "V26 WPAD pointer path missing" }
           if ($provider -match "SDL3/" -or $controller -match "SDL3/") { throw "SDL3 include leaked into PRE build" }
-          Write-Host "V26 runtime core present; GUI/LatteTiming intentionally excluded from this diagnostic."
+          if ($inputSettings -notmatch "wxScrolledWindow") { throw "V26 resizable input settings layout missing" }
+          if ($wiimotePanel -notmatch "Dolphin-style input") { throw "V26 motion settings UI missing" }
+          if ($wiimotePanel -notmatch "Pointer Calibration Period") { throw "V26 pointer calibration UI missing" }
+          if ($wiimotePanel -notmatch "on_pair_button") { throw "PRE Wii controller pairing UI was lost" }
+          Write-Host "V26 Joy-Con runtime and settings UI present; PRE pairing behavior retained."
 
       - name: Verify PRE H264 stayed byte-identical
         shell: pwsh
@@ -124,7 +133,7 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Package V33 runtime diagnostic
+      - name: Package final V33 test build
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
@@ -132,27 +141,33 @@ jobs:
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item $exe "package\Cemu.exe" -Force
           @"
-          Cemu V33 - PRE-1257 Wii Party U Core + V26 Runtime Core
-          =======================================================
+          Cemu V33 - PRE-1257 Wii Party U Core + V26 Joy-Con Stack
+          =========================================================
           Base: exact known-good PRE-1257 commit 4b9c7c0d307495c679127381d6f00bab9f0c2933
           H264Dec.cpp: byte-identical to PRE-1257.
           V26 runtime backport: SDL Joy-Con engine, profile state/hotkeys, Dolphin pointer,
           WPAD/KPAD integration, Mahony/calibrated motion.
           SDL3 V26 input code is manually adapted to PRE's SDL2 APIs and millisecond timestamps.
-          GUI/LatteTiming are intentionally NOT in this diagnostic build yet.
+          V26 settings backport: resizable/scrolled input window, per-Joy-Con orientation and
+          hotkeys, combined Dolphin-style motion/pointer dialog, live sensor/calibration status,
+          FOV/deadzone/smoothing/inversion/scales and recenter binding.
+          PRE's Wii/Wii U controller pairing button remains available.
+
+          Intentionally not moved: V26 LatteTiming/fast-forward changes. They are unrelated to
+          Joy-Con/motion/pointer and remain isolated from the known-good Wii Party U core.
 
           Test by replacing only Cemu.exe inside the existing V26 portable folder.
           Keep controller profiles/settings/mlc01 unchanged so the V26 XML profile values are reused.
           "@ | Set-Content "package\README-V33.txt" -Encoding utf8
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
-          Compress-Archive -Path "package\*" -DestinationPath "Cemu-V33-PRE1257-V26-Runtime-Windows-x64.zip" -CompressionLevel Optimal -Force
+          Compress-Archive -Path "package\*" -DestinationPath "Cemu-V33-PRE1257-V26-JoyCon-Windows-x64.zip" -CompressionLevel Optimal -Force
           Write-Host "V33 SHA-256: $hash"
 
       - name: Upload V33 Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-V33-PRE1257-V26-Runtime-Windows-x64
-          path: Cemu-V33-PRE1257-V26-Runtime-Windows-x64.zip
+          name: Cemu-V33-PRE1257-V26-JoyCon-Windows-x64
+          path: Cemu-V33-PRE1257-V26-JoyCon-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30

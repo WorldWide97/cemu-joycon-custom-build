@@ -35,6 +35,23 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def replace_exact(text: str, old: str, new: str, label: str, expected: int = 1) -> str:
+    count = text.count(old)
+    if count != expected:
+        raise RuntimeError(f"{label}: expected {expected} match(es), found {count}")
+    return text.replace(old, new)
+
+
+def text_between(text: str, start: str, end: str, label: str) -> str:
+    start_index = text.find(start)
+    if start_index < 0:
+        raise RuntimeError(f"{label}: start anchor not found")
+    end_index = text.find(end, start_index + len(start))
+    if end_index < 0:
+        raise RuntimeError(f"{label}: end anchor not found")
+    return text[start_index:end_index]
+
+
 def copy_runtime_file(snapshot: Path, cemu: Path, rel: str) -> None:
     src = snapshot / rel
     dst = cemu / "src" / rel
@@ -312,10 +329,120 @@ def adapt_sdl_provider_cpp(snapshot: Path, cemu: Path) -> None:
     print("Adapted V26 SDLControllerProvider.cpp to PRE SDL2, preserving V26 motion/calibration math")
 
 
+def adapt_input_settings_gui(cemu: Path) -> None:
+    """Backport only V26's resizable/scrolled input layout onto PRE's wx GUI."""
+    path = cemu / "src/gui/input/InputSettings2.cpp"
+    text = path.read_text(encoding="utf-8")
+    replacements = [
+        (
+            "#include <wx/bmpbuttn.h>\n",
+            "#include <wx/bmpbuttn.h>\n#include <wx/scrolwin.h>\n",
+            "add wxScrolledWindow include",
+        ),
+        (
+            ': wxDialog(parent, wxID_ANY, _("Input settings"))',
+            ': wxDialog(parent, wxID_ANY, _("Input settings"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX)',
+            "make input settings resizable",
+        ),
+        (
+            "\t\tauto* page = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);\n",
+            "\t\tauto* page = new wxScrolledWindow(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxVSCROLL);\n\t\tpage->SetScrollRate(0, 12);\n",
+            "use scrolled controller pages",
+        ),
+        (
+            "\tFit();\n\n    panel->Hide();",
+            "\tFit();\n\tSetMinSize(wxSize(700, 500));\n\tSetSize(wxSize(1000, 720));\n\n    panel->Hide();",
+            "set useful V26 input window size",
+        ),
+        (
+            "\tauto* sizer = new wxGridBagSizer();\n\n\t{",
+            "\tauto* sizer = new wxGridBagSizer();\n\tsizer->AddGrowableCol(1, 1);\n\tsizer->AddGrowableRow(7, 1);\n\n\t{",
+            "grow controller page content",
+        ),
+        (
+            "\tpage->SetSizer(sizer);\n\tpage->Layout();\n\n\tpage->SetClientObject",
+            "\tpage->SetSizer(sizer);\n\tpage->Layout();\n\tif (auto* scrolled = dynamic_cast<wxScrolledWindow*>(page))\n\t\tscrolled->FitInside();\n\n\tpage->SetClientObject",
+            "fit initial scrolled controller page",
+        ),
+        (
+            "\t\tpage->wxWindowBase::Layout();\n\t\tpage->wxWindow::Update();",
+            "\t\tpage->wxWindowBase::Layout();\n\t\tif (auto* scrolled = dynamic_cast<wxScrolledWindow*>(page))\n\t\t\tscrolled->FitInside();\n\t\tpage->wxWindow::Update();",
+            "refit controller page after panel changes",
+        ),
+    ]
+    for old, new, label in replacements:
+        text = replace_exact(text, old, new, label)
+    text = replace_exact(
+        text,
+        "panel_sizer->Add(panel, 0, wxEXPAND);",
+        "panel_sizer->Add(panel, 1, wxEXPAND);",
+        "let V26 controller panels expand",
+        expected=2,
+    )
+    write_text(path, text)
+    print("Adapted V26 resizable/scrolled input settings layout to PRE GUI")
+
+
+def adapt_wiimote_settings_gui(snapshot: Path, cemu: Path) -> None:
+    """Move V26 Joy-Con controls/dialogs while retaining PRE's pairing UI."""
+    final_cpp = (snapshot / "gui/wxgui/input/panels/WiimoteInputPanel.cpp").read_text(encoding="utf-8")
+    final_header = (snapshot / "gui/wxgui/input/panels/WiimoteInputPanel.h").read_text(encoding="utf-8")
+
+    cpp_path = cemu / "src/gui/input/panels/WiimoteInputPanel.cpp"
+    cpp = cpp_path.read_text(encoding="utf-8")
+    cpp = replace_exact(
+        cpp,
+        "#include <wx/checkbox.h>\n",
+        "#include <wx/checkbox.h>\n#include <wx/choice.h>\n#include <wx/spinctrl.h>\n#include <wx/dcbuffer.h>\n#include <wx/dialog.h>\n#include <wx/statbox.h>\n#include <wx/settings.h>\n#include <wx/timer.h>\n#include <cmath>\n#include <utility>\n",
+        "add V26 Joy-Con GUI dependencies",
+    )
+    cpp = replace_exact(
+        cpp,
+        '#include "input/emulated/WiimoteController.h"\n',
+        '#include "input/emulated/WiimoteController.h"\n#include "input/api/SDL/SDLController.h"\n',
+        "connect Wiimote panel to SDL Joy-Con runtime",
+    )
+
+    constructor_start = "\tmain_sizer->Add(horiz_main_sizer, 0, wxEXPAND | wxALL, 5);\n"
+    constructor_end = "\tmain_sizer->Add(new wxStaticLine(this), 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 5);"
+    constructor_block = text_between(final_cpp, constructor_start, constructor_end, "extract V26 Joy-Con settings panel")
+    cpp = replace_exact(cpp, constructor_start, constructor_block, "insert V26 Joy-Con settings panel")
+
+    timer_start = "\tInputPanel::on_timer(emulated_controller, controller);\n\n"
+    timer_end = "\tif (emulated_controller)\n"
+    timer_block = text_between(final_cpp, timer_start, timer_end, "extract V26 live Joy-Con UI refresh")
+    cpp = replace_exact(cpp, timer_start, timer_block, "insert V26 live Joy-Con UI refresh")
+
+    methods_start = "wxString WiimoteInputPanel::joycon_hotkey_label"
+    methods_end = "void WiimoteInputPanel::load_controller"
+    methods = text_between(final_cpp, methods_start, methods_end, "extract V26 Joy-Con settings methods")
+    cpp = replace_exact(cpp, methods_end, methods + methods_end, "insert V26 Joy-Con settings methods")
+    write_text(cpp_path, cpp)
+
+    header_path = cemu / "src/gui/input/panels/WiimoteInputPanel.h"
+    header = header_path.read_text(encoding="utf-8")
+    forward_start = "class wxChoice;"
+    forward_end = "\n\nclass WiimoteInputPanel"
+    forward_declarations = text_between(final_header, forward_start, forward_end, "extract V26 GUI forward declarations")
+    header = replace_exact(
+        header,
+        "class wxInputDraw;\n",
+        "class wxInputDraw;\n" + forward_declarations + "\n\n",
+        "add V26 GUI forward declarations",
+    )
+    fields_start = "\tenum class JoyConHotkeyCapture"
+    fields_end = "\tvoid add_button_row"
+    fields = text_between(final_header, fields_start, fields_end, "extract V26 Joy-Con GUI state")
+    header = replace_exact(header, fields_end, fields + fields_end, "add V26 Joy-Con GUI state")
+    write_text(header_path, header)
+    print("Adapted exact V26 Joy-Con settings UI/dialogs to PRE paths while retaining PRE pairing")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("cemu", nargs="?", default="cemu")
     ap.add_argument("--wrapper", default=None)
+    ap.add_argument("--with-gui", action="store_true")
     args = ap.parse_args()
 
     cemu = Path(args.cemu).resolve()
@@ -342,6 +469,10 @@ def main() -> None:
     adapt_sdl_controller_header(snapshot, cemu)
     adapt_sdl_controller_cpp(snapshot, cemu)
 
+    if args.with_gui:
+        adapt_input_settings_gui(cemu)
+        adapt_wiimote_settings_gui(snapshot, cemu)
+
     runtime_files = [
         "src/input/api/SDL/SDLController.cpp",
         "src/input/api/SDL/SDLController.h",
@@ -357,7 +488,10 @@ def main() -> None:
             raise RuntimeError(f"Backport output missing: {rel}")
 
     print("V33 PRE-1257 + V26 runtime-core backport generated successfully.")
-    print("GUI/LatteTiming are intentionally excluded from this diagnostic build so Wii Party U core and Joy-Con runtime are isolated first.")
+    if args.with_gui:
+        print("V26 Joy-Con settings GUI was semantically adapted to PRE while preserving PRE-only pairing behavior.")
+    else:
+        print("GUI/LatteTiming are intentionally excluded from this diagnostic build so Wii Party U core and Joy-Con runtime are isolated first.")
 
 
 if __name__ == "__main__":
