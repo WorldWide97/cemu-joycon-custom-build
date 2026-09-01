@@ -1,0 +1,13 @@
+src/Cafe/HW/Latte/Core/LatteTiming.cpp
+src/gui/wxgui/input/HotkeySettings.cpp
+src/gui/wxgui/input/InputSettings2.cpp
+src/gui/wxgui/input/panels/WiimoteInputPanel.cpp
+src/gui/wxgui/input/panels/WiimoteInputPanel.h
+src/input/api/SDL/SDLController.cpp
+src/input/api/SDL/SDLController.h
+src/input/api/SDL/SDLControllerProvider.cpp
+src/input/api/SDL/SDLControllerProvider.h
+src/input/emulated/WPADController.cpp
+src/input/emulated/WPADController.h
+src/input/motion/Mahony.h
+src/input/motion/MotionHandler.h

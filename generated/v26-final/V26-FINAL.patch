@@ -1,0 +1,2850 @@
+diff --git a/src/Cafe/HW/Latte/Core/LatteTiming.cpp b/src/Cafe/HW/Latte/Core/LatteTiming.cpp
+index 60f4c52..12f74c4 100644
+--- a/src/Cafe/HW/Latte/Core/LatteTiming.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteTiming.cpp
+@@ -5,6 +5,7 @@
+ #endif
+ #include "util/highresolutiontimer/HighResolutionTimer.h"
+ #include "config/CemuConfig.h"
++#include "config/ActiveSettings.h"
+ #include "Cafe/CafeSystem.h"
+ 
+ sint32 s_customVsyncFrequency = -1;
+@@ -29,7 +30,12 @@ HRTick LatteTime_CalculateTimeBetweenVSync()
+ 		tick /= 1002ull;
+ 		tick /= 60ull;
+ 	}
+-	return tick;
++	const uint8 timerShift = ActiveSettings::GetTimerShiftFactor();
++	if (timerShift < 3)
++		tick >>= (3 - timerShift);
++	else if (timerShift > 3)
++		tick <<= (timerShift - 3);
++	return std::max<HRTick>(tick, (HRTick)1);
+ }
+ 
+ void LatteTiming_setCustomVsyncFrequency(sint32 frequency)
+@@ -147,9 +153,13 @@ void LatteTiming_NotifyHostVSync()
+ 		s_lastHostVsync = nowTimePoint;
+ 	}
+ 	else
+-		s_lastHostVsync += vsyncPeriod;
++		s_lastHostVsync += vsyncPeriod * elapsedPeriods;
+ 
+-	LatteTiming_signalVsync();
++	uint64 signalCount = 1;
++	if (ActiveSettings::GetTimerShiftFactor() < 3)
++		signalCount = std::clamp<uint64>(elapsedPeriods, 1, 8);
++	for (uint64 i = 0; i < signalCount; ++i)
++		LatteTiming_signalVsync();
+ }
+ 
+ // handle timed vsync event
+diff --git a/src/gui/wxgui/input/HotkeySettings.cpp b/src/gui/wxgui/input/HotkeySettings.cpp
+index d84ffa1..3d527ed 100644
+--- a/src/gui/wxgui/input/HotkeySettings.cpp
++++ b/src/gui/wxgui/input/HotkeySettings.cpp
+@@ -1,5 +1,6 @@
+ #include "wxgui/input/HotkeySettings.h"
+ #include "Cafe/HW/Latte/Renderer/Renderer.h"
++#include "Cafe/HW/Latte/Core/LatteOverlay.h"
+ #include "interface/WindowSystem.h"
+ #include <config/ActiveSettings.h>
+ #include "input/InputManager.h"
+@@ -195,7 +196,9 @@ void HotkeySettings::Init(MainWindow* mainWindowFrame)
+ 				 g_renderer->RequestScreenshot(SaveScreenshot);
+ 		 }},
+ 		{&s_cfgHotkeys.toggleFastForward, [](void) {
+-			 ActiveSettings::SetTimerShiftFactor((ActiveSettings::GetTimerShiftFactor() < 3) ? 3 : 1);
++			 const bool enableFastForward = ActiveSettings::GetTimerShiftFactor() >= 3;
++			 ActiveSettings::SetTimerShiftFactor(enableFastForward ? 1 : 3);
++			 LatteOverlay_pushNotification(enableFastForward ? "Fast-forward ON (4x)" : "Fast-forward OFF (1x)", 2200);
+ 		 }},
+ 		{&s_cfgHotkeys.exitApplication, [](void) {
+ 			auto closeEvent = new wxCloseEvent{wxEVT_CLOSE_WINDOW, s_mainWindow->GetId()};
+diff --git a/src/gui/wxgui/input/InputSettings2.cpp b/src/gui/wxgui/input/InputSettings2.cpp
+index d77e143..b88dc72 100644
+--- a/src/gui/wxgui/input/InputSettings2.cpp
++++ b/src/gui/wxgui/input/InputSettings2.cpp
+@@ -16,6 +16,7 @@
+ #include <wx/statline.h>
+ #include <wx/bmpbuttn.h>
+ #include <wx/settings.h>
++#include <wx/scrolwin.h>
+ 
+ #include "config/ActiveSettings.h"
+ #include "wxgui/input/InputAPIAddWindow.h"
+@@ -67,7 +68,7 @@ using wxControllerPageData = wxCustomData<ControllerPage>;
+ 
+ 
+ InputSettings2::InputSettings2(wxWindow* parent)
+-	: wxDialog(parent, wxID_ANY, _("Input settings"))
++	: wxDialog(parent, wxID_ANY, _("Input settings"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX)
+ {
+ 	this->SetSizeHints(wxDefaultSize, wxDefaultSize);
+ 
+@@ -82,7 +83,8 @@ InputSettings2::InputSettings2(wxWindow* parent)
+ 	m_notebook = new wxNotebook(this, wxID_ANY);
+ 	for(size_t i = 0; i < InputManager::kMaxController; ++i)
+ 	{
+-		auto* page = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
++		auto* page = new wxScrolledWindow(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxVSCROLL);
++		page->SetScrollRate(0, 12);
+ 		page->SetClientObject(nullptr); // force internal type to client object
+ 		m_notebook->AddPage(page, formatWxString(_("Controller {}"), i + 1));
+ 	}
+@@ -100,7 +102,7 @@ InputSettings2::InputSettings2(wxWindow* parent)
+ 
+ 	auto* first_page_sizer = dynamic_cast<wxGridBagSizer*>(first_page->GetSizer());
+ 	auto* panel_sizer = first_page_sizer->FindItemAtPosition(wxGBPosition(7, 0))->GetSizer();
+-	panel_sizer->Add(panel, 0, wxEXPAND);
++	panel_sizer->Add(panel, 1, wxEXPAND);
+ 
+ 	panel->Show();
+ 	first_page->Layout();
+@@ -108,6 +110,8 @@ InputSettings2::InputSettings2(wxWindow* parent)
+ 	SetSizer(sizer);
+ 	Layout();
+ 	Fit();
++	SetMinSize(wxSize(700, 500));
++	SetSize(wxSize(1000, 720));
+ 
+     panel->Hide();
+ 
+@@ -145,6 +149,8 @@ wxWindow* InputSettings2::initialize_page(size_t index)
+ 
+ 	wxWindowUpdateLocker lock(page);
+ 	auto* sizer = new wxGridBagSizer();
++	sizer->AddGrowableCol(1, 1);
++	sizer->AddGrowableRow(7, 1);
+ 
+ 	{
+ 		// profile
+@@ -303,6 +309,8 @@ wxWindow* InputSettings2::initialize_page(size_t index)
+ 
+ 	page->SetSizer(sizer);
+ 	page->Layout();
++	if (auto* scrolled = dynamic_cast<wxScrolledWindow*>(page))
++		scrolled->FitInside();
+ 
+ 	page->SetClientObject(new wxCustomData(page_data));
+ 
+@@ -465,7 +473,7 @@ void InputSettings2::update_state()
+ 
+ 			auto* panel_sizer = sizer->FindItemAtPosition(wxGBPosition(7, 0))->GetSizer();
+ 			wxASSERT(panel_sizer);
+-			panel_sizer->Add(panel, 0, wxEXPAND);
++			panel_sizer->Add(panel, 1, wxEXPAND);
+ 		}
+ 
+ 		panel->load_controller(page_data.m_controller);
+@@ -474,6 +482,8 @@ void InputSettings2::update_state()
+ 
+ 		panel->Show();
+ 		page->wxWindowBase::Layout();
++		if (auto* scrolled = dynamic_cast<wxScrolledWindow*>(page))
++			scrolled->FitInside();
+ 		page->wxWindow::Update();
+ 	}
+ }
+diff --git a/src/gui/wxgui/input/panels/WiimoteInputPanel.cpp b/src/gui/wxgui/input/panels/WiimoteInputPanel.cpp
+index da94852..132342a 100644
+--- a/src/gui/wxgui/input/panels/WiimoteInputPanel.cpp
++++ b/src/gui/wxgui/input/panels/WiimoteInputPanel.cpp
+@@ -7,9 +7,19 @@
+ #include <wx/textctrl.h>
+ #include <wx/slider.h>
+ #include <wx/checkbox.h>
++#include <wx/choice.h>
++#include <wx/spinctrl.h>
++#include <wx/dcbuffer.h>
++#include <wx/dialog.h>
++#include <wx/statbox.h>
++#include <wx/settings.h>
++#include <wx/timer.h>
++#include <cmath>
++#include <utility>
+ 
+ #include "wxgui/helpers/wxControlObject.h"
+ #include "input/emulated/WiimoteController.h"
++#include "input/api/SDL/SDLController.h"
+ #include "wxgui/helpers/wxHelpers.h"
+ #include "wxgui/components/wxInputDraw.h"
+ 
+@@ -59,6 +69,125 @@ WiimoteInputPanel::WiimoteInputPanel(wxWindow* parent)
+ 	extensions_sizer->Add(m_classic);
+ 
+ 	main_sizer->Add(horiz_main_sizer, 0, wxEXPAND | wxALL, 5);
++
++	m_joycon_panel = new wxPanel(this, wxID_ANY);
++	auto* joycon_sizer = new wxBoxSizer(wxHORIZONTAL);
++	m_joycon_name = new wxStaticText(m_joycon_panel, wxID_ANY, _("Joy-Con"));
++	m_joycon_name->SetFont(bold_font);
++	joycon_sizer->Add(m_joycon_name, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 10);
++	joycon_sizer->Add(new wxStaticText(m_joycon_panel, wxID_ANY, _("Orientation:")), 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);
++	m_joycon_orientation = new wxChoice(m_joycon_panel, wxID_ANY);
++	m_joycon_orientation->Append(_("Sideways"));
++	m_joycon_orientation->Append(_("Vertical"));
++	m_joycon_orientation->SetSelection(0);
++	m_joycon_orientation->Bind(wxEVT_CHOICE, &WiimoteInputPanel::on_joycon_orientation_change, this);
++	joycon_sizer->Add(m_joycon_orientation, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 12);
++	m_joycon_sideways_hotkey = new wxButton(m_joycon_panel, wxID_ANY, _("Sideways hotkey: Not set"));
++	m_joycon_vertical_hotkey = new wxButton(m_joycon_panel, wxID_ANY, _("Vertical hotkey: Not set"));
++	m_joycon_sideways_hotkey->Bind(wxEVT_BUTTON, &WiimoteInputPanel::on_joycon_hotkey_click, this);
++	m_joycon_vertical_hotkey->Bind(wxEVT_BUTTON, &WiimoteInputPanel::on_joycon_hotkey_click, this);
++	m_joycon_sideways_hotkey->Bind(wxEVT_RIGHT_UP, &WiimoteInputPanel::on_joycon_hotkey_clear, this);
++	m_joycon_vertical_hotkey->Bind(wxEVT_RIGHT_UP, &WiimoteInputPanel::on_joycon_hotkey_clear, this);
++	m_joycon_sideways_hotkey->SetToolTip(_("Click, release all controller buttons, then press and release a 2+ button combo. Right-click to clear."));
++	m_joycon_vertical_hotkey->SetToolTip(_("Click, release all controller buttons, then press and release a 2+ button combo. Right-click to clear."));
++	joycon_sizer->Add(m_joycon_sideways_hotkey, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);
++	joycon_sizer->Add(m_joycon_vertical_hotkey, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 10);
++	m_joycon_pointer_enabled = new wxCheckBox(m_joycon_panel, wxID_ANY, _("Pointer enabled"));
++	m_joycon_pointer_enabled->SetValue(true);
++	m_joycon_pointer_enabled->Bind(wxEVT_CHECKBOX, &WiimoteInputPanel::on_joycon_pointer_enable, this);
++	joycon_sizer->Add(m_joycon_pointer_enabled, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 8);
++	m_joycon_pointer_hotkey = new wxButton(m_joycon_panel, wxID_ANY, _("Pointer hotkey: Not set"));
++	m_joycon_pointer_hotkey->Bind(wxEVT_BUTTON, &WiimoteInputPanel::on_joycon_hotkey_click, this);
++	m_joycon_pointer_hotkey->Bind(wxEVT_RIGHT_UP, &WiimoteInputPanel::on_joycon_hotkey_clear, this);
++	m_joycon_pointer_hotkey->SetToolTip(_("Click, release all controller buttons, then press and release a 2+ button combo to toggle pointer ON/OFF. Right-click to clear."));
++	joycon_sizer->Add(m_joycon_pointer_hotkey, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 10);
++	m_joycon_status = new wxStaticText(m_joycon_panel, wxID_ANY, _("Hotkeys are independent for each Joy-Con."));
++	joycon_sizer->Add(m_joycon_status, 1, wxALIGN_CENTER_VERTICAL);
++	auto* joycon_outer = new wxBoxSizer(wxVERTICAL);
++	joycon_outer->Add(joycon_sizer, 0, wxEXPAND | wxBOTTOM, 5);
++
++	auto* pointer_sizer = new wxBoxSizer(wxHORIZONTAL);
++	m_joycon_pointer_preview = new wxPanel(m_joycon_panel, wxID_ANY, wxDefaultPosition, wxSize(180, 95), wxBORDER_SIMPLE);
++	m_joycon_pointer_preview->SetMinSize(wxSize(180, 95));
++	m_joycon_pointer_preview->SetBackgroundStyle(wxBG_STYLE_PAINT);
++	m_joycon_pointer_preview->Bind(wxEVT_PAINT, &WiimoteInputPanel::on_joycon_pointer_paint, this);
++	pointer_sizer->Add(m_joycon_pointer_preview, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 8);
++	m_joycon_pointer_recenter = new wxButton(m_joycon_panel, wxID_ANY, _("Recenter pointer"));
++	m_joycon_pointer_recenter->Bind(wxEVT_BUTTON, &WiimoteInputPanel::on_joycon_pointer_recenter, this);
++	pointer_sizer->Add(m_joycon_pointer_recenter, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 8);
++
++	auto make_spin = [this, pointer_sizer](const wxString& label, double value, double min_value, double max_value, double increment, int digits) {
++		pointer_sizer->Add(new wxStaticText(m_joycon_panel, wxID_ANY, label), 0, wxLEFT | wxRIGHT | wxALIGN_CENTER_VERTICAL, 3);
++		auto* spin = new wxSpinCtrlDouble(m_joycon_panel, wxID_ANY);
++		spin->SetRange(min_value, max_value);
++		spin->SetIncrement(increment);
++		spin->SetDigits(digits);
++		spin->SetValue(value);
++		spin->SetMinSize(wxSize(72, -1));
++		spin->Bind(wxEVT_TEXT, &WiimoteInputPanel::on_joycon_pointer_settings, this);
++		pointer_sizer->Add(spin, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);
++		return spin;
++	};
++	m_joycon_pointer_yaw = make_spin(_("Yaw °"), 25.0, 5.0, 120.0, 1.0, 1);
++	m_joycon_pointer_pitch = make_spin(_("Pitch °"), 20.0, 5.0, 120.0, 1.0, 1);
++	m_joycon_pointer_deadzone = make_spin(_("Deadzone °"), 0.15, 0.0, 5.0, 0.05, 2);
++	m_joycon_pointer_smoothing = make_spin(_("Smooth"), 0.08, 0.0, 0.95, 0.01, 2);
++	m_joycon_pointer_invert_x = new wxCheckBox(m_joycon_panel, wxID_ANY, _("Invert X"));
++	m_joycon_pointer_invert_y = new wxCheckBox(m_joycon_panel, wxID_ANY, _("Invert Y"));
++	m_joycon_pointer_invert_x->Bind(wxEVT_CHECKBOX, &WiimoteInputPanel::on_joycon_pointer_settings, this);
++	m_joycon_pointer_invert_y->Bind(wxEVT_CHECKBOX, &WiimoteInputPanel::on_joycon_pointer_settings, this);
++	pointer_sizer->Add(m_joycon_pointer_invert_x, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);
++	pointer_sizer->Add(m_joycon_pointer_invert_y, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);
++	joycon_outer->Add(pointer_sizer, 0, wxEXPAND | wxBOTTOM, 5);
++
++	auto* motion_sizer = new wxBoxSizer(wxHORIZONTAL);
++	motion_sizer->Add(new wxStaticText(m_joycon_panel, wxID_ANY, _("Motion calibration:")), 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 6);
++	auto make_motion_spin = [this, motion_sizer](const wxString& label) {
++		motion_sizer->Add(new wxStaticText(m_joycon_panel, wxID_ANY, label), 0, wxLEFT | wxRIGHT | wxALIGN_CENTER_VERTICAL, 3);
++		auto* spin = new wxSpinCtrlDouble(m_joycon_panel, wxID_ANY);
++		spin->SetRange(0.25, 2.0);
++		spin->SetIncrement(0.05);
++		spin->SetDigits(2);
++		spin->SetValue(1.0);
++		spin->SetMinSize(wxSize(70, -1));
++		spin->Bind(wxEVT_TEXT, &WiimoteInputPanel::on_joycon_motion_settings, this);
++		motion_sizer->Add(spin, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 4);
++		return spin;
++	};
++	m_joycon_motion_x = make_motion_spin(_("X"));
++	m_joycon_motion_y = make_motion_spin(_("Y"));
++	m_joycon_motion_z = make_motion_spin(_("Z"));
++	m_joycon_motion_invert_x = new wxCheckBox(m_joycon_panel, wxID_ANY, _("Invert X"));
++	m_joycon_motion_invert_y = new wxCheckBox(m_joycon_panel, wxID_ANY, _("Invert Y"));
++	m_joycon_motion_invert_z = new wxCheckBox(m_joycon_panel, wxID_ANY, _("Invert Z"));
++	for (auto* checkbox : { m_joycon_motion_invert_x, m_joycon_motion_invert_y, m_joycon_motion_invert_z })
++		checkbox->Bind(wxEVT_CHECKBOX, &WiimoteInputPanel::on_joycon_motion_settings, this);
++	motion_sizer->Add(m_joycon_motion_invert_x, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 4);
++	motion_sizer->Add(m_joycon_motion_invert_y, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 4);
++	motion_sizer->Add(m_joycon_motion_invert_z, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 8);
++	m_joycon_motion_reset = new wxButton(m_joycon_panel, wxID_ANY, _("Reset motion"));
++	m_joycon_motion_reset->Bind(wxEVT_BUTTON, &WiimoteInputPanel::on_joycon_motion_reset, this);
++	motion_sizer->Add(m_joycon_motion_reset, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 8);
++	m_joycon_motion_live = new wxStaticText(m_joycon_panel, wxID_ANY, _("Gyro 0 0 0 | Acc 0 0 0 | Pointer 50% 50%"));
++	motion_sizer->Add(m_joycon_motion_live, 1, wxALIGN_CENTER_VERTICAL);
++	joycon_outer->Add(motion_sizer, 0, wxEXPAND);
++
++	// V11: the dense V8 rows remain alive for profile compatibility and live
++	// refresh, but settings are presented through focused Dolphin-style dialogs.
++	pointer_sizer->ShowItems(false);
++	motion_sizer->ShowItems(false);
++	auto* dolphin_settings = new wxBoxSizer(wxHORIZONTAL);
++	dolphin_settings->Add(new wxStaticText(m_joycon_panel, wxID_ANY, _("Dolphin-style input:")), 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 8);
++	m_joycon_motion_dialog = new wxButton(m_joycon_panel, wxID_ANY, _("Motion Input..."));
++	m_joycon_motion_dialog->Bind(wxEVT_BUTTON, &WiimoteInputPanel::on_joycon_motion_dialog, this);
++	dolphin_settings->Add(m_joycon_motion_dialog, 0, wxRIGHT, 8);
++	dolphin_settings->Add(new wxStaticText(m_joycon_panel, wxID_ANY, _("Point and motion settings are combined in one Dolphin-style window.")), 1, wxALIGN_CENTER_VERTICAL);
++	joycon_outer->Add(dolphin_settings, 0, wxEXPAND | wxTOP, 3);
++
++	m_joycon_panel->SetSizer(joycon_outer);
++	m_joycon_panel->Hide();
++	main_sizer->Add(m_joycon_panel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
++
+ 	main_sizer->Add(new wxStaticLine(this), 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 5);
+ 
+ 	m_item_sizer = new wxGridBagSizer();
+@@ -235,12 +364,37 @@ void WiimoteInputPanel::on_timer(const EmulatedControllerPtr& emulated_controlle
+ 	{
+ 		const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller);
+ 		wxASSERT(wiimote);
+-
+ 		wiimote->set_device_type(m_device_type);
+ 	}
+ 
+ 	InputPanel::on_timer(emulated_controller, controller);
+ 
++	const auto joycon = std::dynamic_pointer_cast<SDLController>(controller);
++	if (joycon && joycon->is_joycon())
++	{
++		m_active_joycon = joycon;
++		if (!m_joycon_panel->IsShown())
++		{
++			m_joycon_panel->Show();
++			Layout();
++			if (GetParent()) GetParent()->Layout();
++		}
++		update_joycon_hotkey_capture(joycon);
++		update_joycon_controls(joycon);
++	}
++	else
++	{
++		m_active_joycon.reset();
++		m_joycon_capture = JoyConHotkeyCapture::None;
++		m_joycon_capture_buttons.clear();
++		if (m_joycon_panel->IsShown())
++		{
++			m_joycon_panel->Hide();
++			Layout();
++			if (GetParent()) GetParent()->Layout();
++		}
++	}
++
+ 	if (emulated_controller)
+ 	{
+ 		const auto axis = emulated_controller->get_axis();
+@@ -248,6 +402,635 @@ void WiimoteInputPanel::on_timer(const EmulatedControllerPtr& emulated_controlle
+ 	}
+ }
+ 
++wxString WiimoteInputPanel::joycon_hotkey_label(const std::shared_ptr<SDLController>& joycon, const std::vector<uint32>& buttons) const
++{
++	if (!joycon || buttons.empty()) return _("Not set");
++	wxString result;
++	for (size_t i = 0; i < buttons.size(); ++i)
++	{
++		if (i) result += " + ";
++		result += wxString::FromUTF8(joycon->get_button_name(buttons[i]));
++	}
++	return result;
++}
++
++void WiimoteInputPanel::update_joycon_controls(const std::shared_ptr<SDLController>& joycon)
++{
++	if (!joycon) return;
++	m_joycon_name->SetLabel(joycon->is_left_joycon() ? _("Joy-Con L") : _("Joy-Con R"));
++	// Internal Vertical == physical Sideways; internal Sideways == physical Vertical.
++	const int selection = joycon->get_joycon_orientation() == SDLController::JoyConOrientation::Vertical ? 0 : 1;
++	if (m_joycon_orientation->GetSelection() != selection) m_joycon_orientation->SetSelection(selection);
++	if (m_joycon_capture != JoyConHotkeyCapture::Sideways)
++		m_joycon_sideways_hotkey->SetLabel(_("Sideways hotkey: ") + joycon_hotkey_label(joycon, joycon->get_sideways_hotkey()));
++	if (m_joycon_capture != JoyConHotkeyCapture::Vertical)
++		m_joycon_vertical_hotkey->SetLabel(_("Vertical hotkey: ") + joycon_hotkey_label(joycon, joycon->get_vertical_hotkey()));
++	m_joycon_pointer_enabled->SetValue(joycon->is_pointer_enabled());
++	if (m_joycon_capture != JoyConHotkeyCapture::Pointer)
++		m_joycon_pointer_hotkey->SetLabel(_("Pointer hotkey: ") + joycon_hotkey_label(joycon, joycon->get_pointer_hotkey()));
++	m_joycon_pointer_yaw->SetValue(joycon->get_pointer_yaw_degrees());
++	m_joycon_pointer_pitch->SetValue(joycon->get_pointer_pitch_degrees());
++	m_joycon_pointer_deadzone->SetValue(joycon->get_pointer_deadzone_degrees());
++	m_joycon_pointer_smoothing->SetValue(joycon->get_pointer_smoothing());
++	m_joycon_pointer_invert_x->SetValue(joycon->get_pointer_invert_x());
++	m_joycon_pointer_invert_y->SetValue(joycon->get_pointer_invert_y());
++	float motion_x, motion_y, motion_z;
++	joycon->get_motion_scale(motion_x, motion_y, motion_z);
++	m_joycon_motion_x->SetValue(std::abs(motion_x));
++	m_joycon_motion_y->SetValue(std::abs(motion_y));
++	m_joycon_motion_z->SetValue(std::abs(motion_z));
++	m_joycon_motion_invert_x->SetValue(motion_x < 0.0f);
++	m_joycon_motion_invert_y->SetValue(motion_y < 0.0f);
++	m_joycon_motion_invert_z->SetValue(motion_z < 0.0f);
++
++	glm::vec2 pointer{}, previous{};
++	m_joycon_preview_valid = joycon->update_joycon_pointer(pointer, previous);
++	if (m_joycon_preview_valid)
++	{
++		m_joycon_preview_x = pointer.x;
++		m_joycon_preview_y = pointer.y;
++	}
++	if (m_joycon_pointer_preview) m_joycon_pointer_preview->Refresh(false);
++	auto motion = joycon->get_motion_sample();
++	float gyro[3]{}, acc[3]{};
++	motion.getGyrometer(gyro);
++	motion.getAccelerometer(acc);
++	m_joycon_motion_live->SetLabel(wxString::Format(_("Gyro %.2f %.2f %.2f | Acc %.2f %.2f %.2f | Pointer %.0f%% %.0f%%"),
++		gyro[0], gyro[1], gyro[2], acc[0], acc[1], acc[2], m_joycon_preview_x * 100.0f, m_joycon_preview_y * 100.0f));
++}
++
++void WiimoteInputPanel::on_joycon_orientation_change(wxCommandEvent&)
++{
++	if (const auto joycon = m_active_joycon.lock())
++	{
++		joycon->set_joycon_orientation(m_joycon_orientation->GetSelection() == 1 ? SDLController::JoyConOrientation::Sideways : SDLController::JoyConOrientation::Vertical);
++		update_joycon_controls(joycon);
++	}
++}
++
++void WiimoteInputPanel::on_joycon_pointer_dialog(wxCommandEvent&)
++{
++	const auto joycon = m_active_joycon.lock();
++	if (!joycon)
++		return;
++
++	wxDialog dialog(this, wxID_ANY, _("Pointer - Dolphin Motion"), wxDefaultPosition, wxDefaultSize,
++		wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
++	const float original_yaw = joycon->get_pointer_yaw_degrees();
++	const float original_pitch = joycon->get_pointer_pitch_degrees();
++	const float original_deadzone = joycon->get_pointer_deadzone_degrees();
++	const float original_smoothing = joycon->get_pointer_smoothing();
++	const bool original_invert_x = joycon->get_pointer_invert_x();
++	const bool original_invert_y = joycon->get_pointer_invert_y();
++	auto* outer = new wxBoxSizer(wxVERTICAL);
++	outer->Add(new wxStaticText(&dialog, wxID_ANY,
++		_("Live pointer view: yellow = sensor, blue = deadzone target, green = smoothed game output.")),
++		0, wxEXPAND | wxALL, 10);
++
++	glm::vec2 sensor{0.5f}, accepted{0.5f}, output{0.5f};
++	bool preview_valid = joycon->get_joycon_pointer_debug(sensor, accepted, output);
++	auto* preview = new wxPanel(&dialog, wxID_ANY, wxDefaultPosition, wxSize(520, 230), wxBORDER_SIMPLE);
++	preview->SetMinSize(wxSize(440, 190));
++	preview->SetBackgroundStyle(wxBG_STYLE_PAINT);
++	preview->Bind(wxEVT_PAINT, [&](wxPaintEvent&) {
++		wxAutoBufferedPaintDC dc(preview);
++		const wxSize size = preview->GetClientSize();
++		dc.SetBackground(wxBrush(wxColour(24, 27, 32)));
++		dc.Clear();
++		dc.SetPen(wxPen(wxColour(70, 76, 86), 1));
++		dc.DrawLine(size.x / 2, 0, size.x / 2, size.y);
++		dc.DrawLine(0, size.y / 2, size.x, size.y / 2);
++		auto point = [&](const glm::vec2& value) {
++			return wxPoint((int)std::lround(std::clamp(value.x, 0.0f, 1.0f) * (size.x - 1)),
++				(int)std::lround(std::clamp(value.y, 0.0f, 1.0f) * (size.y - 1)));
++		};
++		if (!preview_valid)
++		{
++			dc.SetTextForeground(wxColour(210, 210, 210));
++			dc.DrawText(_("Waiting for Joy-Con motion data..."), 12, 12);
++			return;
++		}
++		const wxPoint raw = point(sensor);
++		const wxPoint target = point(accepted);
++		const wxPoint game = point(output);
++		dc.SetPen(wxPen(wxColour(80, 155, 255), 2));
++		dc.DrawLine(target, game);
++		dc.SetPen(*wxTRANSPARENT_PEN);
++		dc.SetBrush(wxBrush(wxColour(255, 205, 65)));
++		dc.DrawCircle(raw, 5);
++		dc.SetBrush(wxBrush(wxColour(75, 150, 255)));
++		dc.DrawCircle(target, 6);
++		dc.SetBrush(wxBrush(wxColour(70, 220, 120)));
++		dc.DrawCircle(game, 7);
++	});
++	outer->Add(preview, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
++
++	auto* box = new wxStaticBoxSizer(wxVERTICAL, &dialog, _("Point"));
++	auto* grid = new wxFlexGridSizer(2, 6, 10);
++	grid->AddGrowableCol(1, 1);
++	auto make_spin = [&](const wxString& label, double value, double minv, double maxv, double step, int digits) {
++		grid->Add(new wxStaticText(&dialog, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
++		auto* spin = new wxSpinCtrlDouble(&dialog, wxID_ANY);
++		spin->SetRange(minv, maxv);
++		spin->SetIncrement(step);
++		spin->SetDigits(digits);
++		spin->SetValue(value);
++		grid->Add(spin, 1, wxEXPAND);
++		return spin;
++	};
++	auto* yaw = make_spin(_("Horizontal FOV (degrees)"), joycon->get_pointer_yaw_degrees(), 0.01, 180.0, 0.5, 2);
++	auto* pitch = make_spin(_("Vertical FOV (degrees)"), joycon->get_pointer_pitch_degrees(), 0.01, 180.0, 0.5, 2);
++	auto* deadzone = make_spin(_("Deadzone (degrees)"), joycon->get_pointer_deadzone_degrees(), 0.0, 5.0, 0.05, 2);
++	auto* smoothing = make_spin(_("Smooth (0 = direct)"), joycon->get_pointer_smoothing(), 0.0, 0.95, 0.01, 2);
++	box->Add(grid, 0, wxEXPAND | wxALL, 8);
++
++	auto* flags = new wxBoxSizer(wxHORIZONTAL);
++	auto* invert_x = new wxCheckBox(&dialog, wxID_ANY, _("Invert X"));
++	auto* invert_y = new wxCheckBox(&dialog, wxID_ANY, _("Invert Y"));
++	invert_x->SetValue(joycon->get_pointer_invert_x());
++	invert_y->SetValue(joycon->get_pointer_invert_y());
++	flags->Add(invert_x, 0, wxRIGHT, 10);
++	flags->Add(invert_y, 0, wxRIGHT, 10);
++	auto* recenter = new wxButton(&dialog, wxID_ANY, _("Recenter now"));
++	recenter->Bind(wxEVT_BUTTON, [joycon](wxCommandEvent&) { joycon->recenter_joycon_pointer(); });
++	flags->Add(recenter, 0, wxRIGHT, 10);
++	box->Add(flags, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
++
++	std::vector<uint32> recenter_hotkey = joycon->get_pointer_recenter_hotkey();
++	bool capture_active = false;
++	bool capture_wait_idle = false;
++	bool capture_pressed = false;
++	auto hotkey_text = [&]() {
++		return _("Recenter shortcut: ") + joycon_hotkey_label(joycon, recenter_hotkey);
++	};
++	auto* hotkey = new wxButton(&dialog, wxID_ANY, hotkey_text());
++	hotkey->SetToolTip(_("Click, release all buttons, then press and release one button or a combo. Right-click to clear."));
++	box->Add(hotkey, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
++	outer->Add(box, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
++
++	auto apply_preview_settings = [=](wxCommandEvent&) {
++		joycon->set_pointer_calibration((float)yaw->GetValue(), (float)pitch->GetValue(),
++			(float)deadzone->GetValue(), (float)smoothing->GetValue(), invert_x->GetValue(), invert_y->GetValue());
++	};
++	for (auto* spin : {yaw, pitch, deadzone, smoothing}) spin->Bind(wxEVT_SPINCTRLDOUBLE, apply_preview_settings);
++	invert_x->Bind(wxEVT_CHECKBOX, apply_preview_settings);
++	invert_y->Bind(wxEVT_CHECKBOX, apply_preview_settings);
++
++	wxTimer refresh_timer(&dialog);
++	dialog.Bind(wxEVT_TIMER, [&](wxTimerEvent&) {
++		glm::vec2 live_position{}, live_previous{};
++		joycon->update_joycon_pointer(live_position, live_previous);
++		preview_valid = joycon->get_joycon_pointer_debug(sensor, accepted, output);
++		preview->Refresh(false);
++		if (!capture_active) return;
++		const auto pressed = joycon->get_pressed_buttons_for_hotkey();
++		if (capture_wait_idle)
++		{
++			if (pressed.empty())
++			{
++				capture_wait_idle = false;
++				hotkey->SetLabel(_("Press recenter button(s), then release..."));
++			}
++			return;
++		}
++		if (!pressed.empty())
++		{
++			recenter_hotkey = pressed;
++			capture_pressed = true;
++			hotkey->SetLabel(_("Release to save recenter shortcut..."));
++		}
++		else if (capture_pressed)
++		{
++			capture_active = false;
++			capture_pressed = false;
++			hotkey->SetLabel(hotkey_text());
++		}
++	}, refresh_timer.GetId());
++	hotkey->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
++		capture_active = true;
++		capture_wait_idle = true;
++		capture_pressed = false;
++		recenter_hotkey.clear();
++		hotkey->SetLabel(_("Release all controller buttons..."));
++	});
++	hotkey->Bind(wxEVT_RIGHT_UP, [&](wxMouseEvent&) {
++		capture_active = false;
++		capture_wait_idle = false;
++		capture_pressed = false;
++		recenter_hotkey.clear();
++		hotkey->SetLabel(hotkey_text());
++	});
++	refresh_timer.Start(33);
++
++	outer->Add(new wxStaticText(&dialog, wxID_ANY,
++		_("Recommended start: Deadzone 0.35 degrees, Smooth 0.10. Recenter is manual; stillness calibration changes gyro bias only.")),
++		0, wxEXPAND | wxALL, 10);
++	outer->Add(dialog.CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 10);
++	dialog.SetSizerAndFit(outer);
++	dialog.SetMinSize(wxSize(600, 650));
++
++	if (dialog.ShowModal() == wxID_OK)
++	{
++		joycon->set_pointer_calibration((float)yaw->GetValue(), (float)pitch->GetValue(),
++			(float)deadzone->GetValue(), (float)smoothing->GetValue(), invert_x->GetValue(), invert_y->GetValue());
++		joycon->set_pointer_recenter_hotkey(std::move(recenter_hotkey));
++	}
++	else
++	{
++		joycon->set_pointer_calibration(original_yaw, original_pitch, original_deadzone,
++			original_smoothing, original_invert_x, original_invert_y);
++	}
++}
++
++void WiimoteInputPanel::on_joycon_motion_dialog(wxCommandEvent&)
++{
++	const auto joycon = m_active_joycon.lock();
++	if (!joycon)
++		return;
++
++	wxDialog dialog(this, wxID_ANY, _("Motion Input - Dolphin Wii Remote"), wxDefaultPosition, wxDefaultSize,
++		wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
++	auto* outer = new wxBoxSizer(wxVERTICAL);
++	outer->Add(new wxStaticText(&dialog, wxID_ANY,
++		_("Point uses Dolphin pointer fusion. Game motion uses the proven Cemu basis plus the hardware-verified Joy-Con R Sideways fix.")),
++		0, wxEXPAND | wxALL, 10);
++
++	const float original_hfov = joycon->get_pointer_yaw_degrees();
++	const float original_vfov = joycon->get_pointer_pitch_degrees();
++	const float original_deadzone = joycon->get_pointer_deadzone_degrees();
++	const float original_smoothing = joycon->get_pointer_smoothing();
++	const bool original_invert_x = joycon->get_pointer_invert_x();
++	const bool original_invert_y = joycon->get_pointer_invert_y();
++	const float original_total_yaw = joycon->get_dolphin_total_yaw_degrees();
++	const float original_accel_influence = joycon->get_dolphin_accel_influence();
++	const float original_gyro_deadzone = joycon->get_dolphin_gyro_deadzone_degrees();
++	const float original_calibration_period = joycon->get_dolphin_calibration_period_seconds();
++	const float original_pointer_calibration_period = joycon->get_pointer_calibration_period_seconds();
++	const auto original_orientation = joycon->get_joycon_orientation();
++
++	SDLControllerProvider::DolphinMotionDebug debug{};
++	bool debug_valid = joycon->get_dolphin_motion_debug(debug);
++	glm::vec2 pointer_sensor{0.5f}, pointer_target{0.5f}, pointer_output{0.5f};
++	bool pointer_valid = joycon->get_joycon_pointer_debug(pointer_sensor, pointer_target, pointer_output);
++
++	auto* groups = new wxBoxSizer(wxHORIZONTAL);
++	auto* point_box = new wxStaticBoxSizer(wxVERTICAL, &dialog, _("Point"));
++	auto* point_preview = new wxPanel(&dialog, wxID_ANY, wxDefaultPosition, wxSize(250, 170), wxBORDER_SIMPLE);
++	point_preview->SetMinSize(wxSize(230, 150));
++	point_preview->SetBackgroundStyle(wxBG_STYLE_PAINT);
++	point_preview->Bind(wxEVT_PAINT, [&](wxPaintEvent&) {
++		wxAutoBufferedPaintDC dc(point_preview);
++		const wxSize size = point_preview->GetClientSize();
++		dc.SetBackground(wxBrush(wxColour(24, 27, 32)));
++		dc.Clear();
++		dc.SetPen(wxPen(wxColour(70, 76, 86), 1));
++		dc.DrawLine(size.x / 2, 0, size.x / 2, size.y);
++		dc.DrawLine(0, size.y / 2, size.x, size.y / 2);
++		if (!pointer_valid)
++		{
++			dc.SetTextForeground(wxColour(210, 210, 210));
++			dc.DrawText(_("Waiting for pointer..."), 8, 8);
++			return;
++		}
++		auto p = [&](const glm::vec2& value) {
++			return wxPoint((int)std::lround(std::clamp(value.x, 0.0f, 1.0f) * (size.x - 1)),
++				(int)std::lround(std::clamp(value.y, 0.0f, 1.0f) * (size.y - 1)));
++		};
++		dc.SetPen(*wxTRANSPARENT_PEN);
++		dc.SetBrush(wxBrush(wxColour(255, 205, 65))); dc.DrawCircle(p(pointer_sensor), 4);
++		dc.SetBrush(wxBrush(wxColour(75, 150, 255))); dc.DrawCircle(p(pointer_target), 5);
++		dc.SetBrush(wxBrush(wxColour(70, 220, 120))); dc.DrawCircle(p(pointer_output), 6);
++	});
++	point_box->Add(point_preview, 0, wxEXPAND | wxALL, 6);
++	point_box->Add(new wxStaticText(&dialog, wxID_ANY, _("Yellow sensor | Blue deadzone | Green game output")), 0, wxLEFT | wxRIGHT | wxBOTTOM, 6);
++
++	auto* point_grid = new wxFlexGridSizer(3, 5, 6);
++	point_grid->AddGrowableCol(1, 1);
++	auto add_point_setting = [&](const wxString& label, double value, double minv, double maxv, double step, int digits) {
++		point_grid->Add(new wxStaticText(&dialog, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
++		auto* spin = new wxSpinCtrlDouble(&dialog, wxID_ANY);
++		spin->SetRange(minv, maxv); spin->SetIncrement(step); spin->SetDigits(digits); spin->SetValue(value);
++		point_grid->Add(spin, 1, wxEXPAND);
++		point_grid->Add(new wxButton(&dialog, wxID_ANY, _("..."), wxDefaultPosition, wxSize(38, -1)), 0);
++		return spin;
++	};
++	auto* total_yaw = add_point_setting(_("Total Yaw"), original_total_yaw, 0.0, 360.0, 1.0, 2);
++	auto* accel_influence = add_point_setting(_("Accelerometer Influence (%)"), original_accel_influence * 100.0f, 0.0, 100.0, 0.1, 2);
++	auto* horizontal_fov = add_point_setting(_("Horizontal FOV"), original_hfov, 0.01, 180.0, 0.5, 2);
++	auto* vertical_fov = add_point_setting(_("Vertical FOV"), original_vfov, 0.01, 180.0, 0.5, 2);
++	auto* pointer_deadzone = add_point_setting(_("Pointer Deadzone"), original_deadzone, 0.0, 5.0, 0.05, 2);
++	auto* pointer_smoothing = add_point_setting(_("Smooth (0 = direct)"), original_smoothing, 0.0, 0.95, 0.01, 2);
++	auto* pointer_calibration_period = add_point_setting(_("Pointer Calibration Period (s)"), original_pointer_calibration_period, 0.0, 30.0, 0.25, 2);
++	point_box->Add(point_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
++
++	auto* point_flags = new wxBoxSizer(wxHORIZONTAL);
++	auto* enabled = new wxCheckBox(&dialog, wxID_ANY, _("Enabled")); enabled->SetValue(joycon->is_pointer_enabled());
++	auto* invert_x = new wxCheckBox(&dialog, wxID_ANY, _("Invert X")); invert_x->SetValue(original_invert_x);
++	auto* invert_y = new wxCheckBox(&dialog, wxID_ANY, _("Invert Y")); invert_y->SetValue(original_invert_y);
++	point_flags->Add(enabled, 0, wxRIGHT, 8); point_flags->Add(invert_x, 0, wxRIGHT, 8); point_flags->Add(invert_y, 0);
++	point_box->Add(point_flags, 0, wxLEFT | wxRIGHT | wxBOTTOM, 6);
++	auto* recenter = new wxButton(&dialog, wxID_ANY, _("Recenter now"));
++	recenter->Bind(wxEVT_BUTTON, [joycon](wxCommandEvent&) { joycon->recenter_joycon_pointer(); });
++	point_box->Add(recenter, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
++	std::vector<uint32> recenter_hotkey = joycon->get_pointer_recenter_hotkey();
++	auto* recenter_binding = new wxButton(&dialog, wxID_ANY,
++		_("Recenter: ") + joycon_hotkey_label(joycon, recenter_hotkey));
++	point_box->Add(recenter_binding, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
++	auto* pointer_calibration_status = new wxStaticText(&dialog, wxID_ANY, _("Pointer Calibration: waiting for sensor"));
++	point_box->Add(pointer_calibration_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
++	groups->Add(point_box, 1, wxEXPAND | wxRIGHT, 6);
++
++	auto* passthrough_box = new wxStaticBoxSizer(wxVERTICAL, &dialog, _("Point (Passthrough)"));
++	auto* passthrough_view = new wxPanel(&dialog, wxID_ANY, wxDefaultPosition, wxSize(150, 170), wxBORDER_SIMPLE);
++	passthrough_view->SetBackgroundColour(wxColour(24, 27, 32));
++	passthrough_box->Add(passthrough_view, 0, wxEXPAND | wxALL, 6);
++	auto* passthrough_enabled = new wxCheckBox(&dialog, wxID_ANY, _("Enabled"));
++	passthrough_enabled->SetValue(false); passthrough_enabled->Enable(false);
++	passthrough_box->Add(passthrough_enabled, 0, wxLEFT | wxRIGHT | wxBOTTOM, 6);
++	passthrough_box->Add(new wxStaticText(&dialog, wxID_ANY, _("Native Joy-Con IMU pointer.\nCemu generates DPD objects\nautomatically.")),
++		0, wxLEFT | wxRIGHT | wxBOTTOM, 6);
++	groups->Add(passthrough_box, 0, wxEXPAND | wxRIGHT, 6);
++
++	auto make_sensor_box = [&](const wxString& title, bool gyro) {
++		auto* box = new wxStaticBoxSizer(wxVERTICAL, &dialog, title);
++		auto* view = new wxPanel(&dialog, wxID_ANY, wxDefaultPosition, wxSize(190, 170), wxBORDER_SIMPLE);
++		view->SetMinSize(wxSize(175, 150)); view->SetBackgroundStyle(wxBG_STYLE_PAINT);
++		view->Bind(wxEVT_PAINT, [&, view, gyro](wxPaintEvent&) {
++			wxAutoBufferedPaintDC dc(view);
++			const wxSize size = view->GetClientSize();
++			dc.SetBackground(wxBrush(wxColour(24, 27, 32))); dc.Clear();
++			const int radius = std::max(25, std::min(size.x, size.y) / 2 - 24);
++			const wxPoint center(size.x / 2, size.y / 2);
++			dc.SetPen(wxPen(wxColour(95, 100, 110))); dc.SetBrush(*wxTRANSPARENT_BRUSH);
++			dc.DrawCircle(center, radius); dc.DrawLine(center.x - radius, center.y, center.x + radius, center.y);
++			dc.DrawLine(center.x, center.y - radius, center.x, center.y + radius);
++			if (!debug_valid) return;
++			const glm::vec3 value = gyro ? debug.gyro : debug.accel;
++			const float scale = gyro ? 3.14159265f : 1.0f;
++			const wxPoint tip(center.x + (int)std::lround(std::clamp(value.x / scale, -1.0f, 1.0f) * radius),
++				center.y - (int)std::lround(std::clamp(value.z / scale, -1.0f, 1.0f) * radius));
++			dc.SetPen(wxPen(gyro ? wxColour(80, 135, 255) : wxColour(70, 220, 120), 2)); dc.DrawLine(center, tip);
++			dc.SetBrush(wxBrush(gyro ? wxColour(80, 135, 255) : wxColour(70, 220, 120))); dc.DrawCircle(tip, 5);
++		});
++		box->Add(view, 0, wxEXPAND | wxALL, 6);
++		return std::pair<wxStaticBoxSizer*, wxPanel*>(box, view);
++	};
++	auto [accel_box, accel_view] = make_sensor_box(_("Accelerometer"), false);
++	for (const auto& row : {std::pair<const wchar_t*, const wchar_t*>(L"Up", L"Accel Up"), {L"Down", L"Accel Down"},
++		{L"Left", L"Accel Left"}, {L"Right", L"Accel Right"}, {L"Forward", L"Accel Forward"}, {L"Backward", L"Accel Backward"}})
++	{
++		auto* line = new wxBoxSizer(wxHORIZONTAL); line->Add(new wxStaticText(&dialog, wxID_ANY, wxString(row.first)), 1, wxALIGN_CENTER_VERTICAL);
++		auto* binding = new wxButton(&dialog, wxID_ANY, wxString(row.second)); binding->Enable(false); line->Add(binding, 0);
++		accel_box->Add(line, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
++	}
++	groups->Add(accel_box, 0, wxEXPAND | wxRIGHT, 6);
++
++	auto [gyro_box, gyro_view] = make_sensor_box(_("Gyroscope"), true);
++	for (const auto& row : {std::pair<const wchar_t*, const wchar_t*>(L"Pitch Up", L"Gyro Pitch Up"), {L"Pitch Down", L"Gyro Pitch Down"},
++		{L"Roll Left", L"Gyro Roll Left"}, {L"Roll Right", L"Gyro Roll Right"}, {L"Yaw Left", L"Gyro Yaw Left"}, {L"Yaw Right", L"Gyro Yaw Right"}})
++	{
++		auto* line = new wxBoxSizer(wxHORIZONTAL); line->Add(new wxStaticText(&dialog, wxID_ANY, wxString(row.first)), 1, wxALIGN_CENTER_VERTICAL);
++		auto* binding = new wxButton(&dialog, wxID_ANY, wxString(row.second)); binding->Enable(false); line->Add(binding, 0);
++		gyro_box->Add(line, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
++	}
++	auto add_gyro_setting = [&](const wxString& label, double value, double minv, double maxv, double step) {
++		auto* line = new wxBoxSizer(wxHORIZONTAL); line->Add(new wxStaticText(&dialog, wxID_ANY, label), 1, wxALIGN_CENTER_VERTICAL);
++		auto* spin = new wxSpinCtrlDouble(&dialog, wxID_ANY); spin->SetRange(minv, maxv); spin->SetIncrement(step); spin->SetDigits(2); spin->SetValue(value);
++		line->Add(spin, 0); gyro_box->Add(line, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4); return spin;
++	};
++	auto* gyro_deadzone = add_gyro_setting(_("Dead Zone (degrees/s)"), original_gyro_deadzone, 0.0, 180.0, 0.1);
++	auto* calibration_period = add_gyro_setting(_("Calibration Period (s)"), original_calibration_period, 0.0, 30.0, 0.25);
++	groups->Add(gyro_box, 0, wxEXPAND);
++	outer->Add(groups, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
++
++	auto* orientation_box = new wxStaticBoxSizer(wxHORIZONTAL, &dialog, _("Physical orientation"));
++	auto* orientation = new wxChoice(&dialog, wxID_ANY); orientation->Append(_("Sideways")); orientation->Append(_("Vertical"));
++	// V21: labels and enum now match 1:1. Sideways=0, Vertical=1.
++	orientation->SetSelection(original_orientation == SDLController::JoyConOrientation::Vertical ? 1 : 0);
++	orientation_box->Add(orientation, 0, wxALL, 6);
++	orientation_box->Add(new wxStaticText(&dialog, wxID_ANY,
++		_("V22: Sideways/Vertical motion basis is physical; Joy-Con R accelerometer receives final 180 degree correction; pointer remains independent")),
++		1, wxALL | wxALIGN_CENTER_VERTICAL, 6);
++	outer->Add(orientation_box, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
++
++	auto* status = new wxStaticText(&dialog, wxID_ANY, wxEmptyString);
++	auto* values = new wxStaticText(&dialog, wxID_ANY, wxEmptyString);
++	outer->Add(status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
++	outer->Add(values, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
++
++	bool capture_active = false, capture_wait_idle = false, capture_pressed = false;
++	recenter_binding->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
++		capture_active = true; capture_wait_idle = true; capture_pressed = false; recenter_hotkey.clear();
++		recenter_binding->SetLabel(_("Release all controller buttons..."));
++	});
++	auto apply_live = [=](wxCommandEvent&) {
++		joycon->set_pointer_calibration((float)horizontal_fov->GetValue(), (float)vertical_fov->GetValue(),
++			(float)pointer_deadzone->GetValue(), (float)pointer_smoothing->GetValue(), invert_x->GetValue(), invert_y->GetValue());
++		joycon->set_dolphin_motion_settings((float)total_yaw->GetValue(), (float)accel_influence->GetValue() / 100.0f,
++			(float)gyro_deadzone->GetValue(), (float)calibration_period->GetValue());
++		joycon->set_pointer_calibration_period_seconds((float)pointer_calibration_period->GetValue());
++	};
++	for (auto* spin : {total_yaw, accel_influence, horizontal_fov, vertical_fov, pointer_deadzone, pointer_smoothing, pointer_calibration_period, gyro_deadzone, calibration_period})
++		spin->Bind(wxEVT_SPINCTRLDOUBLE, apply_live);
++	invert_x->Bind(wxEVT_CHECKBOX, apply_live); invert_y->Bind(wxEVT_CHECKBOX, apply_live);
++
++	wxTimer refresh_timer(&dialog);
++	dialog.Bind(wxEVT_TIMER, [&](wxTimerEvent&) {
++		glm::vec2 live{}, previous{}; joycon->update_joycon_pointer(live, previous);
++		pointer_valid = joycon->get_joycon_pointer_debug(pointer_sensor, pointer_target, pointer_output);
++		debug_valid = joycon->get_dolphin_motion_debug(debug);
++		point_preview->Refresh(false); accel_view->Refresh(false); gyro_view->Refresh(false);
++		if (debug_valid)
++		{
++			const int pointer_percent = (int)std::lround(debug.calibration_progress * 100.0f);
++			if (debug.calibrated && debug.stable) pointer_calibration_status->SetLabel(wxString::Format(_("Pointer Calibration: READY / STILL | %.0f Hz"), debug.sample_rate_hz));
++			else if (debug.stable) pointer_calibration_status->SetLabel(wxString::Format(_("Pointer Calibration: KEEP STILL %d%% | %.0f Hz"), pointer_percent, debug.sample_rate_hz));
++			else pointer_calibration_status->SetLabel(wxString::Format(_("Pointer Calibration: MOVING - timer restarted | %.0f Hz"), debug.sample_rate_hz));
++
++			const int game_percent = (int)std::lround(debug.game_calibration_progress * 100.0f);
++			if (debug.game_calibrated && debug.game_stable) status->SetLabel(wxString::Format(_("Game Gyro Calibration: READY / STILL | %.0f Hz"), debug.game_sample_rate_hz));
++			else if (debug.game_stable) status->SetLabel(wxString::Format(_("Game Gyro Calibration: KEEP STILL %d%% | %.0f Hz"), game_percent, debug.game_sample_rate_hz));
++			else status->SetLabel(wxString::Format(_("Game Gyro Calibration: MOVING - timer restarted | %.0f Hz"), debug.game_sample_rate_hz));
++
++			values->SetLabel(wxString::Format(_("Gyro: %+.3f %+.3f %+.3f rad/s | Acc: %+.3f %+.3f %+.3f g | Game Bias: %+.4f %+.4f %+.4f | Pointer Bias: %+.4f %+.4f %+.4f"),
++				debug.gyro.x, debug.gyro.y, debug.gyro.z, debug.accel.x, debug.accel.y, debug.accel.z,
++				debug.game_bias.x, debug.game_bias.y, debug.game_bias.z, debug.bias.x, debug.bias.y, debug.bias.z));
++		}
++		if (!capture_active) return;
++		const auto pressed = joycon->get_pressed_buttons_for_hotkey();
++		if (capture_wait_idle) { if (pressed.empty()) { capture_wait_idle = false; recenter_binding->SetLabel(_("Press Recenter button(s), then release...")); } return; }
++		if (!pressed.empty()) { recenter_hotkey = pressed; capture_pressed = true; recenter_binding->SetLabel(_("Release to save Recenter...")); }
++		else if (capture_pressed) { capture_active = false; capture_pressed = false; recenter_binding->SetLabel(_("Recenter: ") + joycon_hotkey_label(joycon, recenter_hotkey)); }
++	}, refresh_timer.GetId());
++	refresh_timer.Start(33);
++
++	outer->Add(new wxStaticText(&dialog, wxID_ANY,
++		_("V21 defaults: Total Yaw 25 degrees | Accelerometer Influence 1% | FOV 42 / 31.5 degrees | Gyro Dead Zone 2 degrees/s | Game Gyro Calibration 3 s | Pointer Calibration 3 s | minimum 25 Hz.")),
++		0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
++	outer->Add(dialog.CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 10);
++	dialog.SetSizerAndFit(outer);
++	dialog.SetMinSize(wxSize(1120, 760));
++
++	if (dialog.ShowModal() == wxID_OK)
++	{
++		joycon->set_pointer_enabled(enabled->GetValue(), false);
++		joycon->set_pointer_recenter_hotkey(std::move(recenter_hotkey));
++		// V21: selecting Sideways stores Sideways; selecting Vertical stores Vertical.
++		joycon->set_joycon_orientation(orientation->GetSelection() == 0 ?
++			SDLController::JoyConOrientation::Sideways : SDLController::JoyConOrientation::Vertical);
++		joycon->set_motion_scale(1.0f, 1.0f, 1.0f);
++	}
++	else
++	{
++		joycon->set_pointer_calibration(original_hfov, original_vfov, original_deadzone, original_smoothing, original_invert_x, original_invert_y);
++		joycon->set_dolphin_motion_settings(original_total_yaw, original_accel_influence, original_gyro_deadzone, original_calibration_period);
++		joycon->set_pointer_calibration_period_seconds(original_pointer_calibration_period);
++		joycon->set_joycon_orientation(original_orientation, false);
++	}
++}
++
++void WiimoteInputPanel::on_joycon_pointer_recenter(wxCommandEvent&)
++{
++	if (const auto joycon = m_active_joycon.lock())
++		joycon->recenter_joycon_pointer();
++}
++
++void WiimoteInputPanel::on_joycon_pointer_settings(wxCommandEvent&)
++{
++	if (const auto joycon = m_active_joycon.lock())
++	{
++		joycon->set_pointer_calibration(
++			(float)m_joycon_pointer_yaw->GetValue(),
++			(float)m_joycon_pointer_pitch->GetValue(),
++			(float)m_joycon_pointer_deadzone->GetValue(),
++			(float)m_joycon_pointer_smoothing->GetValue(),
++			m_joycon_pointer_invert_x->GetValue(),
++			m_joycon_pointer_invert_y->GetValue());
++	}
++}
++
++void WiimoteInputPanel::on_joycon_motion_settings(wxCommandEvent&)
++{
++	if (const auto joycon = m_active_joycon.lock())
++	{
++		const float x = (float)m_joycon_motion_x->GetValue() * (m_joycon_motion_invert_x->GetValue() ? -1.0f : 1.0f);
++		const float y = (float)m_joycon_motion_y->GetValue() * (m_joycon_motion_invert_y->GetValue() ? -1.0f : 1.0f);
++		const float z = (float)m_joycon_motion_z->GetValue() * (m_joycon_motion_invert_z->GetValue() ? -1.0f : 1.0f);
++		joycon->set_motion_scale(x, y, z);
++	}
++}
++
++void WiimoteInputPanel::on_joycon_motion_reset(wxCommandEvent&)
++{
++	m_joycon_motion_x->SetValue(1.0);
++	m_joycon_motion_y->SetValue(1.0);
++	m_joycon_motion_z->SetValue(1.0);
++	m_joycon_motion_invert_x->SetValue(false);
++	m_joycon_motion_invert_y->SetValue(false);
++	m_joycon_motion_invert_z->SetValue(false);
++	if (const auto joycon = m_active_joycon.lock())
++		joycon->set_motion_scale(1.0f, 1.0f, 1.0f);
++}
++
++void WiimoteInputPanel::on_joycon_pointer_paint(wxPaintEvent&)
++{
++	wxAutoBufferedPaintDC dc(m_joycon_pointer_preview);
++	dc.SetBackground(wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW)));
++	dc.Clear();
++	const wxSize size = m_joycon_pointer_preview->GetClientSize();
++	dc.SetPen(wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT)));
++	dc.DrawLine(size.x / 2, 0, size.x / 2, size.y);
++	dc.DrawLine(0, size.y / 2, size.x, size.y / 2);
++	if (m_joycon_preview_valid)
++	{
++		const int x = std::clamp((int)std::lround(m_joycon_preview_x * (size.x - 1)), 0, std::max(0, size.x - 1));
++		const int y = std::clamp((int)std::lround(m_joycon_preview_y * (size.y - 1)), 0, std::max(0, size.y - 1));
++		dc.SetPen(wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT), 2));
++		dc.DrawCircle(x, y, 5);
++	}
++}
++
++void WiimoteInputPanel::on_joycon_pointer_enable(wxCommandEvent&)
++{
++	if (const auto joycon = m_active_joycon.lock())
++	{
++		joycon->set_pointer_enabled(m_joycon_pointer_enabled->GetValue());
++		m_joycon_status->SetLabel(joycon->is_pointer_enabled() ? _("Pointer ON. It recenters when enabled.") : _("Pointer OFF. No IR/DPD data will be sent."));
++	}
++}
++
++void WiimoteInputPanel::on_joycon_hotkey_click(wxCommandEvent& event)
++{
++	if (!m_active_joycon.lock()) return;
++	if (event.GetEventObject() == m_joycon_pointer_hotkey)
++		m_joycon_capture = JoyConHotkeyCapture::Pointer;
++	else
++		m_joycon_capture = event.GetEventObject() == m_joycon_vertical_hotkey ? JoyConHotkeyCapture::Vertical : JoyConHotkeyCapture::Sideways;
++	m_joycon_capture_buttons.clear();
++	m_joycon_capture_wait_for_idle = true;
++	m_joycon_capture_seen_buttons = false;
++	if (m_joycon_capture == JoyConHotkeyCapture::Vertical)
++		m_joycon_vertical_hotkey->SetLabel(_("Vertical hotkey: release all buttons..."));
++	else if (m_joycon_capture == JoyConHotkeyCapture::Pointer)
++		m_joycon_pointer_hotkey->SetLabel(_("Pointer hotkey: release all buttons..."));
++	else
++		m_joycon_sideways_hotkey->SetLabel(_("Sideways hotkey: release all buttons..."));
++	m_joycon_status->SetLabel(_("Then press and release the exact 2+ button combo you want."));
++}
++
++void WiimoteInputPanel::on_joycon_hotkey_clear(wxMouseEvent& event)
++{
++	if (const auto joycon = m_active_joycon.lock())
++	{
++		if (event.GetEventObject() == m_joycon_vertical_hotkey) joycon->set_vertical_hotkey({});
++		else if (event.GetEventObject() == m_joycon_pointer_hotkey) joycon->set_pointer_hotkey({});
++		else joycon->set_sideways_hotkey({});
++		m_joycon_capture = JoyConHotkeyCapture::None;
++		m_joycon_capture_buttons.clear();
++		m_joycon_status->SetLabel(_("Hotkey cleared."));
++		update_joycon_controls(joycon);
++	}
++}
++
++void WiimoteInputPanel::update_joycon_hotkey_capture(const std::shared_ptr<SDLController>& joycon)
++{
++	if (!joycon || m_joycon_capture == JoyConHotkeyCapture::None) return;
++	const auto pressed = joycon->get_pressed_buttons_for_hotkey();
++	if (m_joycon_capture_wait_for_idle)
++	{
++		if (!pressed.empty()) return;
++		m_joycon_capture_wait_for_idle = false;
++		m_joycon_status->SetLabel(_("Press your 2+ button combo now, then release it to save."));
++		return;
++	}
++	if (!pressed.empty())
++	{
++		m_joycon_capture_seen_buttons = true;
++		for (const auto id : pressed)
++			if (std::find(m_joycon_capture_buttons.cbegin(), m_joycon_capture_buttons.cend(), id) == m_joycon_capture_buttons.cend()) m_joycon_capture_buttons.emplace_back(id);
++		std::sort(m_joycon_capture_buttons.begin(), m_joycon_capture_buttons.end());
++		const auto label = joycon_hotkey_label(joycon, m_joycon_capture_buttons);
++		if (m_joycon_capture == JoyConHotkeyCapture::Vertical) m_joycon_vertical_hotkey->SetLabel(_("Vertical hotkey: ") + label);
++		else if (m_joycon_capture == JoyConHotkeyCapture::Pointer) m_joycon_pointer_hotkey->SetLabel(_("Pointer hotkey: ") + label);
++		else m_joycon_sideways_hotkey->SetLabel(_("Sideways hotkey: ") + label);
++		return;
++	}
++	if (!m_joycon_capture_seen_buttons) return;
++	if (m_joycon_capture_buttons.size() < 2)
++		m_joycon_status->SetLabel(_("Not saved: use at least 2 controller buttons."));
++	else
++	{
++		if (m_joycon_capture == JoyConHotkeyCapture::Vertical) joycon->set_vertical_hotkey(m_joycon_capture_buttons);
++		else if (m_joycon_capture == JoyConHotkeyCapture::Pointer) joycon->set_pointer_hotkey(m_joycon_capture_buttons);
++		else joycon->set_sideways_hotkey(m_joycon_capture_buttons);
++		m_joycon_status->SetLabel(_("Hotkey saved. It works instantly during gameplay."));
++	}
++	m_joycon_capture = JoyConHotkeyCapture::None;
++	m_joycon_capture_buttons.clear();
++	m_joycon_capture_seen_buttons = false;
++	update_joycon_controls(joycon);
++}
++
+ void WiimoteInputPanel::load_controller(const EmulatedControllerPtr& emulated_controller)
+ {
+ 	InputPanel::load_controller(emulated_controller);
+diff --git a/src/gui/wxgui/input/panels/WiimoteInputPanel.h b/src/gui/wxgui/input/panels/WiimoteInputPanel.h
+index 946f7cd..bf7082b 100644
+--- a/src/gui/wxgui/input/panels/WiimoteInputPanel.h
++++ b/src/gui/wxgui/input/panels/WiimoteInputPanel.h
+@@ -7,6 +7,11 @@
+ class wxCheckBox;
+ class wxGridBagSizer;
+ class wxInputDraw;
++class wxChoice;
++class wxButton;
++class wxStaticText;
++class wxSpinCtrlDouble;
++class SDLController;
+ 
+ class WiimoteInputPanel : public InputPanel
+ {
+@@ -36,6 +41,56 @@ private:
+ 
+ 	std::vector<wxWindow*> m_nunchuck_items;
+ 
++	enum class JoyConHotkeyCapture { None, Sideways, Vertical, Pointer };
++	wxPanel* m_joycon_panel = nullptr;
++	wxStaticText* m_joycon_name = nullptr;
++	wxChoice* m_joycon_orientation = nullptr;
++	wxButton* m_joycon_sideways_hotkey = nullptr;
++	wxButton* m_joycon_vertical_hotkey = nullptr;
++	wxCheckBox* m_joycon_pointer_enabled = nullptr;
++	wxButton* m_joycon_pointer_hotkey = nullptr;
++	wxButton* m_joycon_pointer_recenter = nullptr;
++	wxPanel* m_joycon_pointer_preview = nullptr;
++	wxSpinCtrlDouble* m_joycon_pointer_yaw = nullptr;
++	wxSpinCtrlDouble* m_joycon_pointer_pitch = nullptr;
++	wxSpinCtrlDouble* m_joycon_pointer_deadzone = nullptr;
++	wxSpinCtrlDouble* m_joycon_pointer_smoothing = nullptr;
++	wxCheckBox* m_joycon_pointer_invert_x = nullptr;
++	wxCheckBox* m_joycon_pointer_invert_y = nullptr;
++	wxSpinCtrlDouble* m_joycon_motion_x = nullptr;
++	wxSpinCtrlDouble* m_joycon_motion_y = nullptr;
++	wxSpinCtrlDouble* m_joycon_motion_z = nullptr;
++	wxCheckBox* m_joycon_motion_invert_x = nullptr;
++	wxCheckBox* m_joycon_motion_invert_y = nullptr;
++	wxCheckBox* m_joycon_motion_invert_z = nullptr;
++	wxButton* m_joycon_motion_reset = nullptr;
++	wxStaticText* m_joycon_motion_live = nullptr;
++	wxButton* m_joycon_motion_dialog = nullptr;
++	wxStaticText* m_joycon_status = nullptr;
++	float m_joycon_preview_x = 0.5f;
++	float m_joycon_preview_y = 0.5f;
++	bool m_joycon_preview_valid = false;
++	std::weak_ptr<SDLController> m_active_joycon;
++	JoyConHotkeyCapture m_joycon_capture = JoyConHotkeyCapture::None;
++	bool m_joycon_capture_wait_for_idle = false;
++	bool m_joycon_capture_seen_buttons = false;
++	std::vector<uint32> m_joycon_capture_buttons;
++
++	void on_joycon_orientation_change(wxCommandEvent& event);
++	void on_joycon_pointer_enable(wxCommandEvent& event);
++	void on_joycon_pointer_recenter(wxCommandEvent& event);
++	void on_joycon_pointer_settings(wxCommandEvent& event);
++	void on_joycon_motion_settings(wxCommandEvent& event);
++	void on_joycon_motion_reset(wxCommandEvent& event);
++	void on_joycon_pointer_dialog(wxCommandEvent& event);
++	void on_joycon_motion_dialog(wxCommandEvent& event);
++	void on_joycon_pointer_paint(wxPaintEvent& event);
++	void on_joycon_hotkey_click(wxCommandEvent& event);
++	void on_joycon_hotkey_clear(wxMouseEvent& event);
++	void update_joycon_controls(const std::shared_ptr<SDLController>& joycon);
++	void update_joycon_hotkey_capture(const std::shared_ptr<SDLController>& joycon);
++	wxString joycon_hotkey_label(const std::shared_ptr<SDLController>& joycon, const std::vector<uint32>& buttons) const;
++
+ 	void add_button_row(sint32 row, sint32 column, const WiimoteController::ButtonId &button_id);
+ };
+ 
+diff --git a/src/input/api/SDL/SDLController.cpp b/src/input/api/SDL/SDLController.cpp
+index 4d18136..a1f8c9d 100644
+--- a/src/input/api/SDL/SDLController.cpp
++++ b/src/input/api/SDL/SDLController.cpp
+@@ -1,6 +1,12 @@
+ #include "input/api/SDL/SDLController.h"
+ 
+ #include "input/api/SDL/SDLControllerProvider.h"
++#include "Cafe/CafeSystem.h"
++#include "Cafe/HW/Latte/Core/LatteOverlay.h"
++
++#include <pugixml.hpp>
++#include <sstream>
++#include <cmath>
+ 
+ SDLController::SDLController(const SDL_GUID& guid, size_t guid_index)
+ 	: base_type(fmt::format("{}_", guid_index), fmt::format("Controller {}", guid_index + 1)), m_guid_index(guid_index),
+@@ -21,6 +27,9 @@ SDLController::SDLController(const SDL_GUID& guid, size_t guid_index, std::strin
+ 
+ SDLController::~SDLController()
+ {
++	if (m_diid >= 0)
++		m_provider->clear_joycon_orientation(m_diid);
++
+ 	if (m_controller)
+ 	{
+ 		SDL_CloseGamepad(m_controller);
+@@ -28,6 +37,659 @@ SDLController::~SDLController()
+ 	}
+ }
+ 
++namespace
++{
++std::string SerializeJoyConHotkey(const std::vector<uint32>& hotkey)
++{
++	std::string value;
++	for (size_t i = 0; i < hotkey.size(); ++i)
++	{
++		if (i)
++			value.push_back(',');
++		value += fmt::format("{}", hotkey[i]);
++	}
++	return value;
++}
++
++std::vector<uint32> ParseJoyConHotkey(std::string_view value)
++{
++	std::vector<uint32> result;
++	std::stringstream stream(std::string{ value });
++	std::string token;
++	while (std::getline(stream, token, ','))
++	{
++		if (token.empty())
++			continue;
++		try
++		{
++			const auto id = ConvertString<uint32>(token);
++			if (id < SDL_GAMEPAD_BUTTON_COUNT)
++				result.emplace_back(id);
++		}
++		catch (...)
++		{
++		}
++	}
++	return result;
++}
++}
++
++bool SDLController::is_left_joycon() const
++{
++	std::scoped_lock lock(m_controller_mutex);
++
++	// Primary source of truth: SDL3 explicitly distinguishes Joy-Con L and R.
++	if (m_controller)
++	{
++		const auto type = SDL_GetGamepadType(m_controller);
++		if (type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT)
++			return true;
++		if (type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT)
++			return false;
++	}
++
++	// Robust fallback for saved/unopened SDL controller objects.
++	if (m_display_name.find("Joy-Con (L)") != std::string::npos ||
++		m_display_name.find("Joy-Con L") != std::string::npos ||
++		m_display_name.find("JoyCon (L)") != std::string::npos ||
++		m_display_name.find("JoyCon L") != std::string::npos)
++		return true;
++	if (m_display_name.find("Joy-Con (R)") != std::string::npos ||
++		m_display_name.find("Joy-Con R") != std::string::npos ||
++		m_display_name.find("JoyCon (R)") != std::string::npos ||
++		m_display_name.find("JoyCon R") != std::string::npos)
++		return false;
++
++	// Last fallback keeps compatibility with Cemu's historical Nintendo GUIDs.
++	return m_guid == kLeftJoyCon;
++}
++
++bool SDLController::is_right_joycon() const
++{
++	std::scoped_lock lock(m_controller_mutex);
++
++	if (m_controller)
++	{
++		const auto type = SDL_GetGamepadType(m_controller);
++		if (type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT)
++			return true;
++		if (type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT)
++			return false;
++	}
++
++	if (m_display_name.find("Joy-Con (R)") != std::string::npos ||
++		m_display_name.find("Joy-Con R") != std::string::npos ||
++		m_display_name.find("JoyCon (R)") != std::string::npos ||
++		m_display_name.find("JoyCon R") != std::string::npos)
++		return true;
++	if (m_display_name.find("Joy-Con (L)") != std::string::npos ||
++		m_display_name.find("Joy-Con L") != std::string::npos ||
++		m_display_name.find("JoyCon (L)") != std::string::npos ||
++		m_display_name.find("JoyCon L") != std::string::npos)
++		return false;
++
++	return m_guid == kRightJoyCon;
++}
++
++void SDLController::normalize_hotkey(std::vector<uint32>& buttons) const
++{
++	std::erase_if(buttons, [](uint32 id) { return id >= SDL_GAMEPAD_BUTTON_COUNT; });
++	std::sort(buttons.begin(), buttons.end());
++	buttons.erase(std::unique(buttons.begin(), buttons.end()), buttons.end());
++	if (buttons.size() < 2)
++		buttons.clear();
++}
++
++std::vector<uint32> SDLController::get_vertical_hotkey() const
++{
++	std::scoped_lock lock(m_controller_mutex);
++	return m_vertical_hotkey;
++}
++
++std::vector<uint32> SDLController::get_sideways_hotkey() const
++{
++	std::scoped_lock lock(m_controller_mutex);
++	return m_sideways_hotkey;
++}
++
++std::vector<uint32> SDLController::get_pointer_hotkey() const
++{
++	std::scoped_lock lock(m_controller_mutex);
++	return m_pointer_hotkey;
++}
++
++std::vector<uint32> SDLController::get_pointer_recenter_hotkey() const
++{
++	std::scoped_lock lock(m_controller_mutex);
++	return m_pointer_recenter_hotkey;
++}
++
++void SDLController::set_vertical_hotkey(std::vector<uint32> buttons)
++{
++	normalize_hotkey(buttons);
++	std::scoped_lock lock(m_controller_mutex);
++	m_vertical_hotkey = std::move(buttons);
++	m_vertical_hotkey_latched = false;
++}
++
++void SDLController::set_sideways_hotkey(std::vector<uint32> buttons)
++{
++	normalize_hotkey(buttons);
++	std::scoped_lock lock(m_controller_mutex);
++	m_sideways_hotkey = std::move(buttons);
++	m_sideways_hotkey_latched = false;
++}
++
++void SDLController::set_pointer_hotkey(std::vector<uint32> buttons)
++{
++	normalize_hotkey(buttons);
++	std::scoped_lock lock(m_controller_mutex);
++	m_pointer_hotkey = std::move(buttons);
++	m_pointer_hotkey_latched = false;
++}
++
++void SDLController::set_pointer_recenter_hotkey(std::vector<uint32> buttons)
++{
++	std::erase_if(buttons, [](uint32 id) { return id >= SDL_GAMEPAD_BUTTON_COUNT; });
++	std::sort(buttons.begin(), buttons.end());
++	buttons.erase(std::unique(buttons.begin(), buttons.end()), buttons.end());
++	std::scoped_lock lock(m_controller_mutex);
++	m_pointer_recenter_hotkey = std::move(buttons);
++	m_pointer_recenter_hotkey_latched = false;
++}
++
++void SDLController::set_pointer_enabled(bool enabled, bool notify)
++{
++	if (!is_joycon())
++		return;
++
++	const bool previous = m_pointer_enabled.exchange(enabled, std::memory_order_relaxed);
++	if (enabled && previous != enabled)
++		recenter_joycon_pointer(false);
++	if (notify && previous != enabled)
++	{
++		const char* side = is_left_joycon() ? "Joy-Con L" : "Joy-Con R";
++		LatteOverlay_pushNotification(fmt::format("{} Pointer {}", side, enabled ? "ON" : "OFF"), 2200);
++	}
++}
++
++void SDLController::set_pointer_calibration(float horizontal_fov_degrees, float vertical_fov_degrees, float deadzone_degrees, float smoothing, bool invert_x, bool invert_y)
++{
++	horizontal_fov_degrees = std::clamp(horizontal_fov_degrees, 0.01f, 180.0f);
++	vertical_fov_degrees = std::clamp(vertical_fov_degrees, 0.01f, 180.0f);
++	deadzone_degrees = std::clamp(deadzone_degrees, 0.0f, 5.0f);
++	smoothing = std::clamp(smoothing, 0.0f, 0.95f);
++
++	m_pointer_yaw_degrees.store(horizontal_fov_degrees, std::memory_order_relaxed);
++	m_pointer_pitch_degrees.store(vertical_fov_degrees, std::memory_order_relaxed);
++	m_pointer_deadzone_degrees.store(deadzone_degrees, std::memory_order_relaxed);
++	m_pointer_smoothing.store(smoothing, std::memory_order_relaxed);
++	m_pointer_invert_x.store(invert_x, std::memory_order_relaxed);
++	m_pointer_invert_y.store(invert_y, std::memory_order_relaxed);
++}
++
++void SDLController::set_dolphin_motion_settings(float total_yaw_degrees, float accel_influence, float gyro_deadzone_degrees, float calibration_period_seconds)
++{
++	total_yaw_degrees = std::clamp(total_yaw_degrees, 0.0f, 360.0f);
++	accel_influence = std::clamp(accel_influence, 0.0f, 1.0f);
++	gyro_deadzone_degrees = std::clamp(gyro_deadzone_degrees, 0.0f, 180.0f);
++	calibration_period_seconds = std::clamp(calibration_period_seconds, 0.0f, 30.0f);
++	m_dolphin_total_yaw_degrees.store(total_yaw_degrees, std::memory_order_relaxed);
++	m_dolphin_accel_influence.store(accel_influence, std::memory_order_relaxed);
++	m_dolphin_gyro_deadzone_degrees.store(gyro_deadzone_degrees, std::memory_order_relaxed);
++	m_dolphin_calibration_period_seconds.store(calibration_period_seconds, std::memory_order_relaxed);
++	if (m_diid >= 0)
++		m_provider->set_joycon_dolphin_motion_settings(m_diid, gyro_deadzone_degrees, calibration_period_seconds);
++}
++
++void SDLController::set_pointer_calibration_period_seconds(float calibration_period_seconds)
++{
++	calibration_period_seconds = std::clamp(calibration_period_seconds, 0.0f, 30.0f);
++	m_pointer_calibration_period_seconds.store(calibration_period_seconds, std::memory_order_relaxed);
++	if (m_diid >= 0)
++		m_provider->set_joycon_pointer_calibration_period(m_diid, calibration_period_seconds);
++}
++
++void SDLController::get_motion_scale(float& x, float& y, float& z) const
++{
++	x = m_motion_scale_x.load(std::memory_order_relaxed);
++	y = m_motion_scale_y.load(std::memory_order_relaxed);
++	z = m_motion_scale_z.load(std::memory_order_relaxed);
++}
++
++void SDLController::set_motion_scale(float x, float y, float z)
++{
++	auto clamp_scale = [](float value) {
++		const float sign = value < 0.0f ? -1.0f : 1.0f;
++		return sign * std::clamp(std::abs(value), 0.25f, 2.0f);
++	};
++	x = clamp_scale(x);
++	y = clamp_scale(y);
++	z = clamp_scale(z);
++	m_motion_scale_x.store(x, std::memory_order_relaxed);
++	m_motion_scale_y.store(y, std::memory_order_relaxed);
++	m_motion_scale_z.store(z, std::memory_order_relaxed);
++	if (m_diid >= 0)
++		m_provider->set_joycon_motion_scale(m_diid, x, y, z);
++	recenter_joycon_pointer(false);
++}
++
++void SDLController::recenter_joycon_pointer(bool notify)
++{
++	{
++		std::scoped_lock lock(m_joycon_pointer_mutex);
++		m_dolphin_recenter_requested = true;
++		m_dolphin_pointer_target = m_joycon_pointer_position;
++		m_dolphin_pointer_last_output_timestamp = 0;
++		m_joycon_pointer_previous = m_joycon_pointer_position;
++	}
++	if (notify && is_joycon())
++	{
++		const char* side = is_left_joycon() ? "Joy-Con L" : "Joy-Con R";
++		LatteOverlay_pushNotification(fmt::format("{} Pointer centered (Dolphin IMU)", side), 1800);
++	}
++}
++
++bool SDLController::update_joycon_pointer(glm::vec2& position, glm::vec2& previous)
++{
++	if (!is_joycon() || !is_pointer_enabled() || !is_connected() || !has_motion())
++		return false;
++
++	glm::vec3 gyro{}, accel{};
++	uint64 sensor_timestamp = 0;
++	if (!m_provider->dolphin_pointer_motion(m_diid, gyro, accel, sensor_timestamp))
++		return false;
++
++	std::scoped_lock lock(m_joycon_pointer_mutex);
++
++	using Q = std::array<float, 4>; // w,x,y,z
++	constexpr float kPi = 3.14159265358979323846f;
++	const float kDolphinTotalYaw = get_dolphin_total_yaw_degrees() * kPi / 180.0f;
++	const float kDolphinHorizontalFov = get_pointer_yaw_degrees() * kPi / 180.0f;
++	const float kDolphinVerticalFov = get_pointer_pitch_degrees() * kPi / 180.0f;
++	const float kDolphinAccelInfluence = get_dolphin_accel_influence();
++
++	auto q_normalize = [](Q q) {
++		const float length = std::sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
++		if (length <= 0.000001f || !std::isfinite(length)) return Q{1.0f,0.0f,0.0f,0.0f};
++		for (float& c : q) c /= length;
++		return q;
++	};
++	auto q_mul = [](const Q& a, const Q& b) {
++		return Q{
++			a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
++			a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
++			a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1],
++			a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0]
++		};
++	};
++	auto q_axis_angle = [q_normalize](const glm::vec3& rotation_vector) {
++		const float angle = glm::length(rotation_vector);
++		if (angle <= 0.0000001f || !std::isfinite(angle)) return Q{1.0f,0.0f,0.0f,0.0f};
++		const glm::vec3 axis = rotation_vector / angle;
++		const float half = angle * 0.5f;
++		const float s = std::sin(half);
++		return q_normalize(Q{std::cos(half), axis.x*s, axis.y*s, axis.z*s});
++	};
++	auto q_rotate = [q_mul](const Q& q, const glm::vec3& v) {
++		const Q p{0.0f, v.x, v.y, v.z};
++		const Q inv{q[0], -q[1], -q[2], -q[3]};
++		const Q r = q_mul(q_mul(q, p), inv);
++		return glm::vec3{r[1], r[2], r[3]};
++	};
++	auto q_inverse_rotate = [q_mul](const Q& q, const glm::vec3& v) {
++		const Q inv{q[0], -q[1], -q[2], -q[3]};
++		const Q p{0.0f, v.x, v.y, v.z};
++		const Q r = q_mul(q_mul(inv, p), q);
++		return glm::vec3{r[1], r[2], r[3]};
++	};
++	auto rotate_x = [q_axis_angle](float angle) { return q_axis_angle(glm::vec3{angle,0.0f,0.0f}); };
++	auto rotate_z = [q_axis_angle](float angle) { return q_axis_angle(glm::vec3{0.0f,0.0f,angle}); };
++	auto get_pitch = [q_rotate](const Q& q) {
++		const glm::vec3 v = q_rotate(q, glm::vec3{0.0f,0.0f,1.0f});
++		return std::atan2(v.y, std::sqrt(v.x*v.x + v.z*v.z));
++	};
++	auto get_yaw = [q_inverse_rotate](const Q& q) {
++		const glm::vec3 v = q_inverse_rotate(q, glm::vec3{0.0f,1.0f,0.0f});
++		return std::atan2(v.x, v.y);
++	};
++
++	Q q = m_dolphin_pointer_rotation;
++	if (!m_joycon_pointer_initialized)
++	{
++		q = {1.0f,0.0f,0.0f,0.0f};
++		m_dolphin_recentered_pitch = 0.0f;
++		m_dolphin_pointer_last_sensor_timestamp = sensor_timestamp;
++		m_dolphin_recenter_requested = true;
++		m_dolphin_pointer_target = {0.5f,0.5f};
++		m_joycon_pointer_position = {0.5f,0.5f};
++		m_joycon_pointer_previous = m_joycon_pointer_position;
++		m_dolphin_pointer_last_output_timestamp = 0;
++		m_joycon_pointer_initialized = true;
++	}
++	else if (sensor_timestamp > m_dolphin_pointer_last_sensor_timestamp)
++	{
++		float dt = static_cast<float>(sensor_timestamp - m_dolphin_pointer_last_sensor_timestamp) / 1000000000.0f;
++		dt = std::clamp(dt, 0.0005f, 0.05f);
++		m_dolphin_pointer_last_sensor_timestamp = sensor_timestamp;
++
++		// Dolphin: GetRotationFromGyroscope(ang_vel * -1 * dt) * rotation.
++		const Q gyro_rotation = q_axis_angle(gyro * -dt);
++		q = q_mul(gyro_rotation, q);
++
++		// Dolphin complementary filter with the user's 1% accelerometer influence.
++		const float accel_len = glm::length(accel);
++		if (accel_len > 0.000001f && std::isfinite(accel_len))
++		{
++			const glm::vec3 normalized_accel = accel / accel_len;
++			const glm::vec3 gyro_vec = q_rotate(q, glm::vec3{0.0f,0.0f,1.0f});
++			const float cos_angle = std::clamp(glm::dot(normalized_accel, gyro_vec), -1.0f, 1.0f);
++			const float abs_cos = std::abs(cos_angle);
++			if (abs_cos > 0.0f && abs_cos < 1.0f)
++			{
++				glm::vec3 axis = glm::cross(gyro_vec, normalized_accel);
++				const float axis_len = glm::length(axis);
++				if (axis_len > 0.000001f)
++				{
++					axis /= axis_len;
++					const Q correction = q_axis_angle(axis * (std::acos(cos_angle) * kDolphinAccelInfluence));
++					q = q_mul(correction, q);
++				}
++			}
++		}
++
++		// Dolphin clamps yaw to half of Total Yaw (25 degrees total).
++		const float yaw = get_yaw(q);
++		const float max_yaw = kDolphinTotalYaw * 0.5f;
++		float target_yaw = std::clamp(yaw, -max_yaw, max_yaw);
++		if (m_dolphin_recenter_requested)
++		{
++			m_dolphin_recentered_pitch = get_pitch(q);
++			target_yaw = 0.0f;
++			m_dolphin_recenter_requested = false;
++		}
++		if (yaw != target_yaw)
++			q = q_mul(q, rotate_z(target_yaw - yaw));
++		q = q_normalize(q);
++		m_dolphin_pointer_rotation = q;
++	}
++
++	// Dolphin applies recentered pitch when producing the final camera transformation.
++	const Q effective = q_normalize(q_mul(q, rotate_x(m_dolphin_recentered_pitch)));
++	float yaw = get_yaw(effective);
++	float pitch = get_pitch(effective);
++	if (get_pointer_invert_x()) yaw = -yaw;
++	if (get_pointer_invert_y()) pitch = -pitch;
++
++	// Preserve the proven V10 default geometry while giving Horizontal FOV the
++	// same sensitivity direction as Dolphin: a wider camera FOV needs more yaw.
++	const float max_yaw = std::max(0.0001f, kDolphinTotalYaw * 0.5f * (kDolphinHorizontalFov / (42.0f * kPi / 180.0f)));
++	const float max_pitch = std::max(0.0001f, kDolphinVerticalFov * 0.5f);
++	const glm::vec2 target{
++		std::clamp(0.5f + 0.5f * (yaw / max_yaw), 0.0f, 1.0f),
++		std::clamp(0.5f + 0.5f * (pitch / max_pitch), 0.0f, 1.0f)
++	};
++	m_dolphin_pointer_sensor_target = target;
++
++	// V11 presentation layer. Keep Dolphin's quaternion/IMU result above untouched;
++	// only suppress tiny hand tremor and interpolate the visible cursor between samples.
++	const float pointer_deadzone = get_pointer_deadzone_degrees() * kPi / 180.0f;
++	const glm::vec2 target_delta = target - m_dolphin_pointer_target;
++	const glm::vec2 angular_delta{ target_delta.x * (2.0f * max_yaw), target_delta.y * (2.0f * max_pitch) };
++	const float angular_distance = glm::length(angular_delta);
++
++	glm::vec2 filtered_target = target;
++	if (pointer_deadzone > 0.0f && angular_distance <= pointer_deadzone)
++	{
++		filtered_target = m_dolphin_pointer_target;
++	}
++	else if (pointer_deadzone > 0.0f && angular_distance > 0.000001f)
++	{
++		// Subtract the threshold rather than jumping across it. Slow intentional
++		// movement accumulates naturally until it exits the tremor radius.
++		const float active_fraction = (angular_distance - pointer_deadzone) / angular_distance;
++		filtered_target = m_dolphin_pointer_target + target_delta * std::clamp(active_fraction, 0.0f, 1.0f);
++	}
++	m_dolphin_pointer_target = filtered_target;
++
++	const uint64 output_now = static_cast<uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++		std::chrono::steady_clock::now().time_since_epoch()).count());
++	float output_dt = 1.0f / 120.0f;
++	if (m_dolphin_pointer_last_output_timestamp != 0 && output_now > m_dolphin_pointer_last_output_timestamp)
++		output_dt = static_cast<float>(output_now - m_dolphin_pointer_last_output_timestamp) / 1000000000.0f;
++	m_dolphin_pointer_last_output_timestamp = output_now;
++	output_dt = std::clamp(output_dt, 0.001f, 0.05f);
++
++	const float smoothing = get_pointer_smoothing();
++	float follow = 1.0f;
++	if (smoothing > 0.0001f)
++	{
++		// 0.10 ~= very light smoothing. Higher values deliberately trade latency
++		// for steadiness; zero keeps the exact V10 direct response.
++		const float time_constant = 0.0025f + smoothing * 0.10f;
++		follow = 1.0f - std::exp(-output_dt / time_constant);
++	}
++
++	m_joycon_pointer_previous = m_joycon_pointer_position;
++	m_joycon_pointer_position += (m_dolphin_pointer_target - m_joycon_pointer_position) * std::clamp(follow, 0.0f, 1.0f);
++	position = m_joycon_pointer_position;
++	previous = m_joycon_pointer_previous;
++	return true;
++}
++
++bool SDLController::get_joycon_pointer_debug(glm::vec2& sensor_target, glm::vec2& deadzone_target, glm::vec2& output) const
++{
++	std::scoped_lock lock(m_joycon_pointer_mutex);
++	if (!m_joycon_pointer_initialized)
++		return false;
++	sensor_target = m_dolphin_pointer_sensor_target;
++	deadzone_target = m_dolphin_pointer_target;
++	output = m_joycon_pointer_position;
++	return true;
++}
++
++bool SDLController::get_dolphin_motion_debug(SDLControllerProvider::DolphinMotionDebug& debug) const
++{
++	return m_diid >= 0 && m_provider->dolphin_motion_debug(m_diid, debug);
++}
++
++std::vector<uint32> SDLController::get_pressed_buttons_for_hotkey()
++{
++	std::vector<uint32> result;
++	std::scoped_lock lock(m_controller_mutex);
++	if (!m_controller || !SDL_GamepadConnected(m_controller))
++		return result;
++
++	for (uint32 i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i)
++	{
++		if (m_buttons[i] && SDL_GetGamepadButton(m_controller, (SDL_GamepadButton)i))
++			result.emplace_back(i);
++	}
++	return result;
++}
++
++void SDLController::set_joycon_orientation(JoyConOrientation orientation, bool notify)
++{
++	if (!is_joycon())
++		return;
++
++	std::scoped_lock lock(m_controller_mutex);
++	const auto previous = m_joycon_orientation.load(std::memory_order_relaxed);
++	m_joycon_orientation.store(orientation, std::memory_order_relaxed);
++	{
++		std::scoped_lock pointer_lock(m_joycon_pointer_mutex);
++		m_joycon_pointer_initialized = false;
++		m_dolphin_pointer_rotation = {1.0f,0.0f,0.0f,0.0f};
++		m_dolphin_recentered_pitch = 0.0f;
++		m_dolphin_pointer_last_sensor_timestamp = 0;
++		m_dolphin_pointer_last_output_timestamp = 0;
++		m_dolphin_pointer_target = {0.5f, 0.5f};
++		m_dolphin_recenter_requested = true;
++	}
++	if (m_diid >= 0)
++	{
++		// V5 user semantics: internal Sideways == physical Vertical.
++		const bool physical_vertical = orientation == JoyConOrientation::Sideways;
++		m_provider->set_joycon_orientation(m_diid, is_left_joycon(), physical_vertical);
++	}
++
++	if (notify && previous != orientation)
++	{
++		const char* side = is_left_joycon() ? "Joy-Con L" : "Joy-Con R";
++		// V26: Mario Kart's shortcut semantics are now 1:1. Other titles retain
++		// the V5 legacy presentation so their hardware-approved behavior is untouched.
++		const TitleId foreground_base_title = TitleIdParser::MakeBaseTitleId(CafeSystem::GetForegroundTitleId());
++		const bool v26_mario_kart_8 =
++			foreground_base_title == 0x000500001010EB00ULL ||
++			foreground_base_title == 0x000500001010EC00ULL ||
++			foreground_base_title == 0x000500001010ED00ULL;
++		const char* mode = v26_mario_kart_8
++			? (orientation == JoyConOrientation::Vertical ? "Vertical" : "Sideways")
++			: (orientation == JoyConOrientation::Vertical ? "Sideways" : "Vertical");
++		LatteOverlay_pushNotification(fmt::format("{} -> {}", side, mode), 2200);
++	}
++}
++
++bool SDLController::is_hotkey_pressed(const ControllerButtonState& buttons, const std::vector<uint32>& hotkey, size_t minimum_buttons) const
++{
++	if (hotkey.size() < minimum_buttons)
++		return false;
++	return std::all_of(hotkey.cbegin(), hotkey.cend(), [&buttons](uint32 id) {
++		return buttons.GetButtonState(id);
++	});
++}
++
++void SDLController::consume_hotkey(ControllerButtonState& buttons, const std::vector<uint32>& hotkey) const
++{
++	for (const auto id : hotkey)
++		buttons.SetButtonState(id, false);
++}
++
++void SDLController::apply_vertical_transform(ControllerState& state) const
++{
++	const auto old_axis = state.axis;
++	const bool south = state.buttons.GetButtonState(SDL_GAMEPAD_BUTTON_SOUTH);
++	const bool east = state.buttons.GetButtonState(SDL_GAMEPAD_BUTTON_EAST);
++	const bool west = state.buttons.GetButtonState(SDL_GAMEPAD_BUTTON_WEST);
++	const bool north = state.buttons.GetButtonState(SDL_GAMEPAD_BUTTON_NORTH);
++
++	if (is_left_joycon())
++	{
++		state.axis.x = -old_axis.y;
++		state.axis.y = old_axis.x;
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_NORTH, west);
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_EAST, north);
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_SOUTH, east);
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_WEST, south);
++	}
++	else if (is_right_joycon())
++	{
++		state.axis.x = old_axis.y;
++		state.axis.y = -old_axis.x;
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_NORTH, east);
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_EAST, south);
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_SOUTH, west);
++		state.buttons.SetButtonState(SDL_GAMEPAD_BUTTON_WEST, north);
++	}
++}
++
++void SDLController::save(pugi::xml_node& node)
++{
++	base_type::save(node);
++	if (!is_joycon())
++		return;
++	node.append_child("joycon_orientation").append_child(pugi::node_pcdata).set_value(fmt::format("{}", (int)get_joycon_orientation()).c_str());
++	node.append_child("joycon_vertical_hotkey").append_child(pugi::node_pcdata).set_value(SerializeJoyConHotkey(get_vertical_hotkey()).c_str());
++	node.append_child("joycon_sideways_hotkey").append_child(pugi::node_pcdata).set_value(SerializeJoyConHotkey(get_sideways_hotkey()).c_str());
++	node.append_child("joycon_pointer_hotkey").append_child(pugi::node_pcdata).set_value(SerializeJoyConHotkey(get_pointer_hotkey()).c_str());
++	node.append_child("joycon_pointer_recenter_hotkey").append_child(pugi::node_pcdata).set_value(SerializeJoyConHotkey(get_pointer_recenter_hotkey()).c_str());
++	node.append_child("joycon_pointer_enabled").append_child(pugi::node_pcdata).set_value(is_pointer_enabled() ? "1" : "0");
++	node.append_child("joycon_pointer_yaw_deg").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_pointer_yaw_degrees()).c_str());
++	node.append_child("joycon_pointer_pitch_deg").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_pointer_pitch_degrees()).c_str());
++	node.append_child("joycon_pointer_deadzone_deg").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_pointer_deadzone_degrees()).c_str());
++	node.append_child("joycon_pointer_smoothing").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_pointer_smoothing()).c_str());
++	node.append_child("joycon_pointer_invert_x").append_child(pugi::node_pcdata).set_value(get_pointer_invert_x() ? "1" : "0");
++	node.append_child("joycon_pointer_invert_y").append_child(pugi::node_pcdata).set_value(get_pointer_invert_y() ? "1" : "0");
++	node.append_child("joycon_dolphin_total_yaw_deg").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_dolphin_total_yaw_degrees()).c_str());
++	node.append_child("joycon_dolphin_accel_influence").append_child(pugi::node_pcdata).set_value(fmt::format("{:.4f}", get_dolphin_accel_influence()).c_str());
++	node.append_child("joycon_dolphin_gyro_deadzone_deg_s").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_dolphin_gyro_deadzone_degrees()).c_str());
++	node.append_child("joycon_dolphin_calibration_period_s").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_dolphin_calibration_period_seconds()).c_str());
++	node.append_child("joycon_pointer_calibration_period_s").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", get_pointer_calibration_period_seconds()).c_str());
++	float motion_x, motion_y, motion_z;
++	get_motion_scale(motion_x, motion_y, motion_z);
++	node.append_child("joycon_motion_scale_x").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", motion_x).c_str());
++	node.append_child("joycon_motion_scale_y").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", motion_y).c_str());
++	node.append_child("joycon_motion_scale_z").append_child(pugi::node_pcdata).set_value(fmt::format("{:.3f}", motion_z).c_str());
++}
++
++void SDLController::load(const pugi::xml_node& node)
++{
++	base_type::load(node);
++	if (!is_joycon())
++		return;
++	if (const auto value = node.child("joycon_vertical_hotkey"))
++		set_vertical_hotkey(ParseJoyConHotkey(value.child_value()));
++	if (const auto value = node.child("joycon_sideways_hotkey"))
++		set_sideways_hotkey(ParseJoyConHotkey(value.child_value()));
++	if (const auto value = node.child("joycon_pointer_hotkey"))
++		set_pointer_hotkey(ParseJoyConHotkey(value.child_value()));
++	if (const auto value = node.child("joycon_pointer_recenter_hotkey"))
++		set_pointer_recenter_hotkey(ParseJoyConHotkey(value.child_value()));
++	bool pointer_enabled = true;
++	if (const auto value = node.child("joycon_pointer_enabled"))
++		pointer_enabled = ConvertString<int>(value.child_value()) != 0;
++	set_pointer_enabled(pointer_enabled, false);
++	float pointer_yaw = 42.0f;
++	float pointer_pitch = 31.5f;
++	float pointer_deadzone = 0.35f;
++	float pointer_smoothing = 0.10f;
++	bool pointer_invert_x = false;
++	bool pointer_invert_y = false;
++	if (const auto value = node.child("joycon_pointer_yaw_deg")) pointer_yaw = ConvertString<float>(value.child_value());
++	if (const auto value = node.child("joycon_pointer_pitch_deg")) pointer_pitch = ConvertString<float>(value.child_value());
++	if (const auto value = node.child("joycon_pointer_deadzone_deg")) pointer_deadzone = ConvertString<float>(value.child_value());
++	if (const auto value = node.child("joycon_pointer_smoothing")) pointer_smoothing = ConvertString<float>(value.child_value());
++	// V8-V12 called these fields yaw/pitch although V10's actual geometry was
++	// fixed at Dolphin 25/31.5. Migrate only the untouched legacy defaults.
++	if (std::abs(pointer_yaw - 25.0f) < 0.001f && std::abs(pointer_pitch - 20.0f) < 0.001f)
++	{
++		pointer_yaw = 42.0f;
++		pointer_pitch = 31.5f;
++	}
++	// V10 displayed 2.00 / 0.01 but did not actually use those fields. Migrate only
++	// that exact pair to V11's practical anti-tremor defaults.
++	if (std::abs(pointer_deadzone - 2.0f) < 0.001f && std::abs(pointer_smoothing - 0.01f) < 0.001f)
++	{
++		pointer_deadzone = 0.35f;
++		pointer_smoothing = 0.10f;
++	}
++	if (const auto value = node.child("joycon_pointer_invert_x")) pointer_invert_x = ConvertString<int>(value.child_value()) != 0;
++	if (const auto value = node.child("joycon_pointer_invert_y")) pointer_invert_y = ConvertString<int>(value.child_value()) != 0;
++	set_pointer_calibration(pointer_yaw, pointer_pitch, pointer_deadzone, pointer_smoothing, pointer_invert_x, pointer_invert_y);
++	float total_yaw = 25.0f;
++	float accel_influence = 0.01f;
++	float gyro_deadzone = 2.0f;
++	float calibration_period = 3.0f;
++	float pointer_calibration_period = 3.0f;
++	if (const auto value = node.child("joycon_dolphin_total_yaw_deg")) total_yaw = ConvertString<float>(value.child_value());
++	if (const auto value = node.child("joycon_dolphin_accel_influence")) accel_influence = ConvertString<float>(value.child_value());
++	if (const auto value = node.child("joycon_dolphin_gyro_deadzone_deg_s")) gyro_deadzone = ConvertString<float>(value.child_value());
++	if (const auto value = node.child("joycon_dolphin_calibration_period_s")) calibration_period = ConvertString<float>(value.child_value());
++	if (const auto value = node.child("joycon_pointer_calibration_period_s")) pointer_calibration_period = ConvertString<float>(value.child_value());
++	set_dolphin_motion_settings(total_yaw, accel_influence, gyro_deadzone, calibration_period);
++	set_pointer_calibration_period_seconds(pointer_calibration_period);
++	// V13 migration: these legacy controls were inert through V11 and distorted
++	// physical units when V12 began consuming them. Dolphin direct input is 1:1.
++	set_motion_scale(1.0f, 1.0f, 1.0f);
++	JoyConOrientation orientation = JoyConOrientation::Sideways;
++	if (const auto value = node.child("joycon_orientation"))
++	{
++		if (ConvertString<int>(value.child_value()) == (int)JoyConOrientation::Vertical)
++			orientation = JoyConOrientation::Vertical;
++	}
++	set_joycon_orientation(orientation, false);
++}
++
+ bool SDLController::is_connected()
+ {
+ 	std::scoped_lock lock(m_controller_mutex);
+@@ -82,6 +744,18 @@ bool SDLController::connect()
+ 	if (SDL_GamepadHasSensor(m_controller, SDL_SENSOR_GYRO))
+ 		m_has_gyro = SDL_SetGamepadSensorEnabled(m_controller, SDL_SENSOR_GYRO, true);
+ 	m_has_rumble = SDL_RumbleGamepad(m_controller, 0, 0, 0);
++	if (is_joycon())
++	{
++		// V5 user semantics: internal Sideways == physical Vertical.
++		const bool physical_vertical = get_joycon_orientation() == JoyConOrientation::Sideways;
++		m_provider->set_joycon_orientation(m_diid, is_left_joycon(), physical_vertical);
++		m_provider->set_joycon_motion_scale(m_diid, 1.0f, 1.0f, 1.0f);
++		m_provider->set_joycon_dolphin_motion_settings(m_diid,
++			m_dolphin_gyro_deadzone_degrees.load(std::memory_order_relaxed),
++			m_dolphin_calibration_period_seconds.load(std::memory_order_relaxed));
++		m_provider->set_joycon_pointer_calibration_period(m_diid,
++			m_pointer_calibration_period_seconds.load(std::memory_order_relaxed));
++	}
+ 	return true;
+ }
+ 
+@@ -142,5 +816,46 @@ ControllerState SDLController::raw_state()
+ 	if (m_axis[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER])
+ 		result.trigger.y = (float)SDL_GetGamepadAxis(m_controller, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) / 32767.0f;
+ 
++	if (is_joycon())
++	{
++		const bool vertical_pressed = is_hotkey_pressed(result.buttons, m_vertical_hotkey);
++		const bool sideways_pressed = is_hotkey_pressed(result.buttons, m_sideways_hotkey);
++		const bool pointer_pressed = is_hotkey_pressed(result.buttons, m_pointer_hotkey);
++		const bool recenter_pressed = is_hotkey_pressed(result.buttons, m_pointer_recenter_hotkey, 1);
++		// V26: V5's legacy hotkey swap is still required by older custom-build
++		// behavior outside Mario Kart. Mario Kart 8 alone uses the now-correct
++		// 1:1 shortcut semantics, so Sideways selects the exact internal Sideways
++		// state that hardware-validated V25-Z at 100%. No motion math changes here.
++		const TitleId foreground_base_title = TitleIdParser::MakeBaseTitleId(CafeSystem::GetForegroundTitleId());
++		const bool v26_mario_kart_8 =
++			foreground_base_title == 0x000500001010EB00ULL ||
++			foreground_base_title == 0x000500001010EC00ULL ||
++			foreground_base_title == 0x000500001010ED00ULL;
++		if (vertical_pressed && !m_vertical_hotkey_latched)
++			set_joycon_orientation(v26_mario_kart_8 ? JoyConOrientation::Vertical : JoyConOrientation::Sideways);
++		if (sideways_pressed && !m_sideways_hotkey_latched)
++			set_joycon_orientation(v26_mario_kart_8 ? JoyConOrientation::Sideways : JoyConOrientation::Vertical);
++		if (pointer_pressed && !m_pointer_hotkey_latched)
++			set_pointer_enabled(!is_pointer_enabled());
++		if (recenter_pressed && !m_pointer_recenter_hotkey_latched)
++			recenter_joycon_pointer();
++		m_vertical_hotkey_latched = vertical_pressed;
++		m_sideways_hotkey_latched = sideways_pressed;
++		m_pointer_hotkey_latched = pointer_pressed;
++		m_pointer_recenter_hotkey_latched = recenter_pressed;
++		if (vertical_pressed)
++			consume_hotkey(result.buttons, m_vertical_hotkey);
++		if (sideways_pressed)
++			consume_hotkey(result.buttons, m_sideways_hotkey);
++		if (pointer_pressed)
++			consume_hotkey(result.buttons, m_pointer_hotkey);
++		if (recenter_pressed)
++			consume_hotkey(result.buttons, m_pointer_recenter_hotkey);
++		// SDL already exposes a separate Joy-Con as a horizontal mini-gamepad.
++		// Rotate controls only when the USER is physically holding it Vertical.
++		if (get_joycon_orientation() == JoyConOrientation::Sideways)
++			apply_vertical_transform(result);
++	}
++
+ 	return result;
+ }
+diff --git a/src/input/api/SDL/SDLController.h b/src/input/api/SDL/SDLController.h
+index 1a4dd8d..9d58d9a 100644
+--- a/src/input/api/SDL/SDLController.h
++++ b/src/input/api/SDL/SDLController.h
+@@ -4,10 +4,17 @@
+ #include "input/api/SDL/SDLControllerProvider.h"
+ 
+ #include <SDL3/SDL_gamepad.h>
++#include <chrono>
+ 
+ class SDLController : public Controller<SDLControllerProvider>
+ {
+ public:
++	enum class JoyConOrientation : uint8
++	{
++		Sideways = 0,
++		Vertical = 1,
++	};
++
+ 	SDLController(const SDL_GUID& guid, size_t guid_index);
+ 	SDLController(const SDL_GUID& guid, size_t guid_index, std::string_view display_name);
+ 	
+@@ -34,6 +41,49 @@ public:
+ 	std::string get_button_name(uint64 button) const override;
+ 	const SDL_GUID& get_guid() const { return m_guid; }
+ 
++	bool is_left_joycon() const;
++	bool is_right_joycon() const;
++	bool is_joycon() const { return is_left_joycon() || is_right_joycon(); }
++
++	JoyConOrientation get_joycon_orientation() const { return m_joycon_orientation.load(std::memory_order_relaxed); }
++	void set_joycon_orientation(JoyConOrientation orientation, bool notify = true);
++	std::vector<uint32> get_vertical_hotkey() const;
++	std::vector<uint32> get_sideways_hotkey() const;
++	std::vector<uint32> get_pointer_hotkey() const;
++	void set_vertical_hotkey(std::vector<uint32> buttons);
++	void set_sideways_hotkey(std::vector<uint32> buttons);
++	void set_pointer_hotkey(std::vector<uint32> buttons);
++	bool is_pointer_enabled() const { return m_pointer_enabled.load(std::memory_order_relaxed); }
++	void set_pointer_enabled(bool enabled, bool notify = true);
++	void recenter_joycon_pointer(bool notify = true);
++	bool update_joycon_pointer(glm::vec2& position, glm::vec2& previous);
++	bool get_joycon_pointer_debug(glm::vec2& sensor_target, glm::vec2& deadzone_target, glm::vec2& output) const;
++	bool get_dolphin_motion_debug(SDLControllerProvider::DolphinMotionDebug& debug) const;
++	std::vector<uint32> get_pointer_recenter_hotkey() const;
++	void set_pointer_recenter_hotkey(std::vector<uint32> buttons);
++
++	float get_pointer_yaw_degrees() const { return m_pointer_yaw_degrees.load(std::memory_order_relaxed); }
++	float get_pointer_pitch_degrees() const { return m_pointer_pitch_degrees.load(std::memory_order_relaxed); }
++	float get_pointer_deadzone_degrees() const { return m_pointer_deadzone_degrees.load(std::memory_order_relaxed); }
++	float get_pointer_smoothing() const { return m_pointer_smoothing.load(std::memory_order_relaxed); }
++	bool get_pointer_invert_x() const { return m_pointer_invert_x.load(std::memory_order_relaxed); }
++	bool get_pointer_invert_y() const { return m_pointer_invert_y.load(std::memory_order_relaxed); }
++	void set_pointer_calibration(float horizontal_fov_degrees, float vertical_fov_degrees, float deadzone_degrees, float smoothing, bool invert_x, bool invert_y);
++	float get_dolphin_total_yaw_degrees() const { return m_dolphin_total_yaw_degrees.load(std::memory_order_relaxed); }
++	float get_dolphin_accel_influence() const { return m_dolphin_accel_influence.load(std::memory_order_relaxed); }
++	float get_dolphin_gyro_deadzone_degrees() const { return m_dolphin_gyro_deadzone_degrees.load(std::memory_order_relaxed); }
++	float get_dolphin_calibration_period_seconds() const { return m_dolphin_calibration_period_seconds.load(std::memory_order_relaxed); }
++	float get_pointer_calibration_period_seconds() const { return m_pointer_calibration_period_seconds.load(std::memory_order_relaxed); }
++	void set_dolphin_motion_settings(float total_yaw_degrees, float accel_influence, float gyro_deadzone_degrees, float calibration_period_seconds);
++	void set_pointer_calibration_period_seconds(float calibration_period_seconds);
++
++	void get_motion_scale(float& x, float& y, float& z) const;
++	void set_motion_scale(float x, float y, float z);
++	std::vector<uint32> get_pressed_buttons_for_hotkey();
++
++	void save(pugi::xml_node& node) override;
++	void load(const pugi::xml_node& node) override;
++
+ 	constexpr static SDL_GUID kLeftJoyCon{ 0x03, 0x00, 0x00, 0x00, 0x7e, 0x05, 0x00, 0x00, 0x06, 0x20, 0x00, 0x00, 0x00, 0x00,0x68 ,0x00 };
+ 	constexpr static SDL_GUID kRightJoyCon{ 0x03, 0x00, 0x00, 0x00, 0x7e, 0x05, 0x00, 0x00, 0x07, 0x20, 0x00, 0x00, 0x00, 0x00, 0x68, 0x00 };
+ 	constexpr static SDL_GUID kSwitchProController{ 0x03, 0x00, 0x00, 0x00, 0x7e, 0x05, 0x00, 0x00, 0x09, 0x20, 0x00, 0x00, 0x00, 0x00, 0x68, 0x00 };
+@@ -46,7 +96,7 @@ private:
+ 
+ 	size_t m_guid_index;
+ 	SDL_GUID m_guid;
+-	std::recursive_mutex m_controller_mutex;
++	mutable std::recursive_mutex m_controller_mutex;
+ 	SDL_Gamepad* m_controller = nullptr;
+ 	SDL_JoystickID m_diid = -1;
+ 
+@@ -56,5 +106,53 @@ private:
+ 	
+ 	std::array<bool, SDL_GAMEPAD_BUTTON_COUNT> m_buttons{};
+ 	std::array<bool, SDL_GAMEPAD_AXIS_COUNT> m_axis{};
++
++	std::atomic<JoyConOrientation> m_joycon_orientation{ JoyConOrientation::Sideways };
++	std::vector<uint32> m_vertical_hotkey{};
++	std::vector<uint32> m_sideways_hotkey{};
++	std::vector<uint32> m_pointer_hotkey{};
++	std::vector<uint32> m_pointer_recenter_hotkey{};
++	std::atomic_bool m_pointer_enabled{ true };
++	// V13: these legacy profile fields now carry Dolphin Horizontal/Vertical FOV.
++	std::atomic<float> m_pointer_yaw_degrees{ 42.0f };
++	std::atomic<float> m_pointer_pitch_degrees{ 31.5f };
++	std::atomic<float> m_dolphin_total_yaw_degrees{ 25.0f };
++	std::atomic<float> m_dolphin_accel_influence{ 0.01f };
++	std::atomic<float> m_dolphin_gyro_deadzone_degrees{ 2.0f };
++	// Game gyro period remains the existing Dolphin-labelled profile field.
++	std::atomic<float> m_dolphin_calibration_period_seconds{ 3.0f };
++	std::atomic<float> m_pointer_calibration_period_seconds{ 3.0f };
++	// V11 defaults: small angular tremor rejection + light temporal interpolation.
++	std::atomic<float> m_pointer_deadzone_degrees{ 0.35f };
++	std::atomic<float> m_pointer_smoothing{ 0.10f };
++	std::atomic_bool m_pointer_invert_x{ false };
++	std::atomic_bool m_pointer_invert_y{ false };
++
++	std::atomic<float> m_motion_scale_x{ 1.0f };
++	std::atomic<float> m_motion_scale_y{ 1.0f };
++	std::atomic<float> m_motion_scale_z{ 1.0f };
++
++	mutable std::mutex m_joycon_pointer_mutex;
++	bool m_joycon_pointer_initialized = false;
++	// Dolphin IMUCursorState: rotation of world around device + recentered pitch.
++	std::array<float, 4> m_dolphin_pointer_rotation{ 1.0f, 0.0f, 0.0f, 0.0f }; // w,x,y,z
++	float m_dolphin_recentered_pitch = 0.0f;
++	uint64 m_dolphin_pointer_last_sensor_timestamp = 0;
++	uint64 m_dolphin_pointer_last_output_timestamp = 0;
++	bool m_dolphin_recenter_requested = true;
++	glm::vec2 m_dolphin_pointer_sensor_target{ 0.5f, 0.5f };
++	glm::vec2 m_dolphin_pointer_target{ 0.5f, 0.5f };
++	glm::vec2 m_joycon_pointer_position{ 0.5f, 0.5f };
++	glm::vec2 m_joycon_pointer_previous{ 0.5f, 0.5f };
++
++	bool m_vertical_hotkey_latched = false;
++	bool m_sideways_hotkey_latched = false;
++	bool m_pointer_hotkey_latched = false;
++	bool m_pointer_recenter_hotkey_latched = false;
++
++	bool is_hotkey_pressed(const ControllerButtonState& buttons, const std::vector<uint32>& hotkey, size_t minimum_buttons = 2) const;
++	void consume_hotkey(ControllerButtonState& buttons, const std::vector<uint32>& hotkey) const;
++	void apply_vertical_transform(ControllerState& state) const;
++	void normalize_hotkey(std::vector<uint32>& buttons) const;
+ };
+ 
+diff --git a/src/input/api/SDL/SDLControllerProvider.cpp b/src/input/api/SDL/SDLControllerProvider.cpp
+index 3aa146a..512230e 100644
+--- a/src/input/api/SDL/SDLControllerProvider.cpp
++++ b/src/input/api/SDL/SDLControllerProvider.cpp
+@@ -113,6 +113,135 @@ MotionSample SDLControllerProvider::motion_sample(SDL_JoystickID diid)
+ 	return (it != s_motion_states.end()) ? it->second.data : MotionSample{};
+ }
+ 
++bool SDLControllerProvider::dolphin_pointer_motion(SDL_JoystickID diid, glm::vec3& gyro, glm::vec3& accel, uint64& timestamp)
++{
++	std::shared_lock lock(s_mutex);
++	const auto it = s_motion_states.find(diid);
++	if (it == s_motion_states.end() || !it->second.dolphin_pointer_has_gyro || !it->second.dolphin_pointer_has_acc)
++		return false;
++	gyro = it->second.dolphin_pointer_gyro;
++	accel = it->second.dolphin_pointer_acc;
++	timestamp = it->second.dolphin_pointer_timestamp;
++	return timestamp != 0;
++}
++
++bool SDLControllerProvider::dolphin_motion_debug(SDL_JoystickID diid, DolphinMotionDebug& debug)
++{
++	std::shared_lock lock(s_mutex);
++	const auto it = s_motion_states.find(diid);
++	if (it == s_motion_states.end() || !it->second.dolphin_pointer_has_gyro || !it->second.dolphin_pointer_has_acc)
++		return false;
++	const auto& state = it->second;
++	debug.gyro = state.dolphin_motion_gyro;
++	debug.accel = state.dolphin_motion_acc;
++	debug.bias = state.dolphin_gyro_bias;
++	debug.game_bias = state.game_gyro_bias;
++	debug.sample_rate_hz = state.dolphin_sample_rate_hz;
++	debug.game_sample_rate_hz = state.game_sample_rate_hz;
++	if (const auto config = s_joycon_orientation_states.find(diid); config != s_joycon_orientation_states.end())
++	{
++		debug.gyro_deadzone_degrees = config->second.gyro_deadzone_degrees;
++		debug.calibration_period_seconds = config->second.pointer_calibration_period_seconds;
++		debug.game_calibration_period_seconds = config->second.calibration_period_seconds;
++	}
++	debug.stable = state.dolphin_calibration_stable;
++	debug.calibrated = state.dolphin_calibration_complete;
++	debug.game_stable = state.game_calibration_stable;
++	debug.game_calibrated = state.game_calibration_complete;
++	debug.timestamp = state.dolphin_pointer_timestamp;
++	if (state.dolphin_calibration_start != 0 && debug.timestamp >= state.dolphin_calibration_start &&
++		debug.calibration_period_seconds > 0.0f)
++	{
++		const float period_ns = debug.calibration_period_seconds * 1000000000.0f;
++		const float elapsed = static_cast<float>(debug.timestamp - state.dolphin_calibration_start) / period_ns;
++		debug.calibration_progress = std::clamp(elapsed, 0.0f, 1.0f);
++	}
++	if (state.game_calibration_start != 0 && debug.timestamp >= state.game_calibration_start &&
++		debug.game_calibration_period_seconds > 0.0f)
++	{
++		const float period_ns = debug.game_calibration_period_seconds * 1000000000.0f;
++		const float elapsed = static_cast<float>(debug.timestamp - state.game_calibration_start) / period_ns;
++		debug.game_calibration_progress = std::clamp(elapsed, 0.0f, 1.0f);
++	}
++	return debug.timestamp != 0;
++}
++
++void SDLControllerProvider::set_joycon_orientation(SDL_JoystickID diid, bool is_left, bool vertical)
++{
++	if (diid < 0)
++		return;
++
++	std::scoped_lock lock(s_mutex);
++	auto& state = s_joycon_orientation_states[diid];
++	const bool changed = state.is_left != is_left || state.vertical != vertical;
++	if (changed)
++		s_motion_states.erase(diid);
++	// Preserve V8 per-device motion calibration while changing orientation.
++	state.is_left = is_left;
++	state.vertical = vertical;
++}
++
++void SDLControllerProvider::set_joycon_motion_scale(SDL_JoystickID diid, float x, float y, float z)
++{
++	if (diid < 0)
++		return;
++
++	std::scoped_lock lock(s_mutex);
++	auto& state = s_joycon_orientation_states[diid];
++	if (state.motion_scale_x != x || state.motion_scale_y != y || state.motion_scale_z != z)
++	{
++		state.motion_scale_x = x;
++		state.motion_scale_y = y;
++		state.motion_scale_z = z;
++		// A basis/calibration change must restart Mahony integration.
++		s_motion_states.erase(diid);
++	}
++}
++
++void SDLControllerProvider::set_joycon_dolphin_motion_settings(SDL_JoystickID diid, float gyro_deadzone_degrees, float calibration_period_seconds)
++{
++	if (diid < 0)
++		return;
++
++	gyro_deadzone_degrees = std::clamp(gyro_deadzone_degrees, 0.0f, 180.0f);
++	calibration_period_seconds = std::clamp(calibration_period_seconds, 0.0f, 30.0f);
++	std::scoped_lock lock(s_mutex);
++	auto& state = s_joycon_orientation_states[diid];
++	if (state.gyro_deadzone_degrees != gyro_deadzone_degrees ||
++		state.calibration_period_seconds != calibration_period_seconds)
++	{
++		state.gyro_deadzone_degrees = gyro_deadzone_degrees;
++		state.calibration_period_seconds = calibration_period_seconds;
++		s_motion_states.erase(diid);
++	}
++}
++
++void SDLControllerProvider::set_joycon_pointer_calibration_period(SDL_JoystickID diid, float calibration_period_seconds)
++{
++	if (diid < 0)
++		return;
++
++	calibration_period_seconds = std::clamp(calibration_period_seconds, 0.0f, 30.0f);
++	std::scoped_lock lock(s_mutex);
++	auto& config = s_joycon_orientation_states[diid];
++	if (config.pointer_calibration_period_seconds != calibration_period_seconds)
++	{
++		config.pointer_calibration_period_seconds = calibration_period_seconds;
++		// Reset both per-device filters so no old basis/bias survives a live setting change.
++		s_motion_states.erase(diid);
++	}
++}
++
++void SDLControllerProvider::clear_joycon_orientation(SDL_JoystickID diid)
++{
++	if (diid < 0)
++		return;
++
++	std::scoped_lock lock(s_mutex);
++	s_joycon_orientation_states.erase(diid);
++	s_motion_states.erase(diid);
++}
++
+ void SDLControllerProvider::InitSDL()
+ {
+ 	SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+@@ -123,6 +252,10 @@ void SDLControllerProvider::InitSDL()
+ 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH, "1");
+ 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH2, "1");
+ 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_JOY_CONS, "1");
++	// Keep each Joy-Con independent in SDL mini-gamepad mode. Cemu applies
++	// per-device Vertical/Sideways transforms at runtime.
++	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, "0");
++	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, "0");
+ 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STADIA, "1");
+ 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
+ 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_LUNA, "1");
+@@ -186,6 +319,7 @@ void SDLControllerProvider::HandleSDLEvent(SDL_Event& event)
+ 			std::scoped_lock _l(s_mutex);
+ 			InputManager::instance().on_device_changed();
+ 			s_motion_states.erase(event.gdevice.which);
++			s_joycon_orientation_states.erase(event.gdevice.which);
+ 			break;
+ 		}
+ 		case SDL_EVENT_GAMEPAD_REMAPPED: 			/**< The controller mapping was updated */
+@@ -212,6 +346,66 @@ void SDLControllerProvider::HandleSDLEvent(SDL_Event& event)
+ 			auto& state = s_motion_states[id];
+ 			auto& tracking = state.tracking;
+ 
++			float sensor_data[3] = {
++				event.gsensor.data[0],
++				event.gsensor.data[1],
++				event.gsensor.data[2]
++			};
++
++			// V10 Dolphin 2606a sensor basis. SDL is intentionally kept in Cemu's
++			// independent mini-gamepad mode, then converted here back to the same native
++			// Joy-Con frame seen by the user's Dolphin build (VERTICAL_JOY_CONS=1).
++			bool v10_is_joycon = false;
++			float v10_native[3] = { sensor_data[0], sensor_data[1], sensor_data[2] };
++			// V14 split stream: V10 native/Dolphin semantics above are pointer-only.
++			// The game stream below is the last known-good V9/V6/V7 Cemu basis.
++			float v9_game_sensor[3] = { sensor_data[0], sensor_data[1], sensor_data[2] };
++			if (const auto config = s_joycon_orientation_states.find(id);
++				config != s_joycon_orientation_states.end())
++			{
++				v10_is_joycon = true;
++				const float x = sensor_data[0];
++				const float y = sensor_data[1];
++				const float z = sensor_data[2];
++				if (config->second.is_left)
++				{
++					// Inverse of SDL L mini mapping: native -> (z,y,-x).
++					v10_native[0] = -z;
++					v10_native[1] = y;
++					v10_native[2] = x;
++				}
++				else
++				{
++					// Inverse of SDL R mini mapping: native -> (-z,y,x).
++					v10_native[0] = z;
++					v10_native[1] = y;
++					v10_native[2] = -x;
++				}
++
++				// V15 game/KPAD physical basis: L Sideways stays in SDL mini-gamepad
++				// coordinates, R Sideways gets the hardware-proven 180-degree X/Z
++				// correction, and Vertical keeps V9's clean +/-90-degree Y rotation.
++				// V22 hardware-driven motion basis. SDL is globally kept in mini-gamepad
++				// mode, but the physical Wii Remote Sideways pose needs the inverse mini
++				// sensor rotation. Vertical deliberately keeps the raw mini sensor basis.
++				// Stick/buttons are handled separately and are not changed here.
++				if (!config->second.vertical)
++				{
++					if (config->second.is_left)
++					{
++						v9_game_sensor[0] = -z;
++						v9_game_sensor[1] = y;
++						v9_game_sensor[2] = x;
++					}
++					else
++					{
++						v9_game_sensor[0] = z;
++						v9_game_sensor[1] = y;
++						v9_game_sensor[2] = -x;
++					}
++				}
++			}
++
+ 			if (event.gsensor.sensor == SDL_SENSOR_ACCEL)
+ 			{
+ 				const auto dif = ts - tracking.lastTimestampAccel;
+@@ -229,9 +423,34 @@ void SDLControllerProvider::HandleSDLEvent(SDL_Event& event)
+ 				}
+ 
+ 				tracking.lastTimestampAccel = ts;
+-				tracking.acc[0] = -event.gsensor.data[0] / 9.81f;
+-				tracking.acc[1] = -event.gsensor.data[1] / 9.81f;
+-				tracking.acc[2] = -event.gsensor.data[2] / 9.81f;
++				if (v10_is_joycon)
++				{
++					glm::vec3 dolphin_acc{ -v10_native[0] / 9.81f, v10_native[2] / 9.81f, v10_native[1] / 9.81f };
++					state.dolphin_pointer_acc = dolphin_acc;
++					state.dolphin_pointer_has_acc = true;
++					// Game motion is deliberately NOT Dolphin-oriented. Reproduce V9's
++					// Cemu tracking vector; the adapter's historical Y/Z signs are applied
++					// at processMotionSample below. Pointer remains pre-orientation.
++					tracking.acc = glm::vec3{
++						-v9_game_sensor[0] / 9.81f,
++						-v9_game_sensor[1] / 9.81f,
++						-v9_game_sensor[2] / 9.81f };
++					if (const auto game_config = s_joycon_orientation_states.find(id);
++						game_config != s_joycon_orientation_states.end() && !game_config->second.is_left)
++					{
++						// V22: final Joy-Con R accelerometer = requested physical 180-degree
++						// correction relative to L. Apply here so later axis routing cannot
++						// cancel or reinterpret the correction. Y remains unchanged.
++						tracking.acc.x = -tracking.acc.x;
++						tracking.acc.z = -tracking.acc.z;
++					}
++				}
++				else
++				{
++					tracking.acc[0] = -sensor_data[0] / 9.81f;
++					tracking.acc[1] = -sensor_data[1] / 9.81f;
++					tracking.acc[2] = -sensor_data[2] / 9.81f;
++				}
+ 				tracking.hasAcc = true;
+ 			}
+ 			if (event.gsensor.sensor == SDL_SENSOR_GYRO)
+@@ -251,13 +470,158 @@ void SDLControllerProvider::HandleSDLEvent(SDL_Event& event)
+ 				}
+ 
+ 				tracking.lastTimestampGyro = ts;
+-				tracking.gyro[0] = event.gsensor.data[0];
+-				tracking.gyro[1] = -event.gsensor.data[1];
+-				tracking.gyro[2] = -event.gsensor.data[2];
++				if (v10_is_joycon)
++				{
++					constexpr double kDolphinMinCalibrationHz = 25.0;
++					float kDolphinGyroDeadzone = 2.0f * 3.14159265358979323846f / 180.0f;
++					uint64 kDolphinCalibrationPeriodNs = 3000000000ULL;
++					if (const auto config = s_joycon_orientation_states.find(id); config != s_joycon_orientation_states.end())
++					{
++						kDolphinGyroDeadzone = config->second.gyro_deadzone_degrees * 3.14159265358979323846f / 180.0f;
++						kDolphinCalibrationPeriodNs = static_cast<uint64>(config->second.pointer_calibration_period_seconds * 1000000000.0f);
++					}
++					glm::vec3 raw_gyro{ -v10_native[0], v10_native[2], v10_native[1] };
++
++					auto restart_calibration = [&]() {
++						state.dolphin_calibration_start = ts;
++						state.dolphin_calibration_sum = raw_gyro;
++						state.dolphin_calibration_count = 1;
++					};
++
++					if (kDolphinCalibrationPeriodNs == 0)
++					{
++						state.dolphin_gyro_bias = {};
++						state.dolphin_calibration_count = 0;
++						state.dolphin_calibration_stable = true;
++						state.dolphin_calibration_complete = true;
++					}
++					else if (state.dolphin_calibration_count == 0)
++					{
++						// V21: learn pointer bias only from a completed stillness window.
++						state.dolphin_calibration_initialized = true;
++						restart_calibration();
++					}
++					else
++					{
++						const uint64 elapsed_ns = ts - state.dolphin_calibration_start;
++						const double elapsed_s = static_cast<double>(elapsed_ns) / 1000000000.0;
++						const glm::vec3 mean = state.dolphin_calibration_sum / static_cast<float>(state.dolphin_calibration_count);
++						const glm::vec3 difference = raw_gyro - mean;
++						const double frequency = elapsed_s > 0.0 ? static_cast<double>(state.dolphin_calibration_count) / elapsed_s : kDolphinMinCalibrationHz;
++						state.dolphin_sample_rate_hz = static_cast<float>(frequency);
++						const bool unstable = std::abs(difference.x) > kDolphinGyroDeadzone ||
++							std::abs(difference.y) > kDolphinGyroDeadzone ||
++							std::abs(difference.z) > kDolphinGyroDeadzone ||
++							frequency < kDolphinMinCalibrationHz;
++						state.dolphin_calibration_stable = !unstable;
++						if (unstable)
++						{
++							state.dolphin_calibration_complete = false;
++							restart_calibration();
++						}
++						else
++						{
++							state.dolphin_calibration_sum += raw_gyro;
++							++state.dolphin_calibration_count;
++							if (elapsed_ns >= kDolphinCalibrationPeriodNs)
++							{
++								state.dolphin_gyro_bias = state.dolphin_calibration_sum / static_cast<float>(state.dolphin_calibration_count);
++								state.dolphin_calibration_complete = true;
++							}
++						}
++					}
++
++					glm::vec3 dolphin_gyro = raw_gyro - state.dolphin_gyro_bias;
++					if (std::abs(dolphin_gyro.x) <= kDolphinGyroDeadzone) dolphin_gyro.x = 0.0f;
++					if (std::abs(dolphin_gyro.y) <= kDolphinGyroDeadzone) dolphin_gyro.y = 0.0f;
++					if (std::abs(dolphin_gyro.z) <= kDolphinGyroDeadzone) dolphin_gyro.z = 0.0f;
++
++					state.dolphin_pointer_gyro = dolphin_gyro;
++					state.dolphin_pointer_timestamp = ts;
++					state.dolphin_pointer_has_gyro = true;
++					// V21 game gyro: preserve V16's exact physical axes, then calibrate
++					// a per-Joy-Con bias only after the configured stillness window.
++					glm::vec3 game_gyro_raw{
++						v9_game_sensor[0],
++						-v9_game_sensor[1],
++						-v9_game_sensor[2] };
++					constexpr double kV21MinCalibrationHz = 25.0;
++					float game_deadzone = 2.0f * 3.14159265358979323846f / 180.0f;
++					uint64 game_period_ns = 3000000000ULL;
++					if (const auto config = s_joycon_orientation_states.find(id); config != s_joycon_orientation_states.end())
++					{
++						game_deadzone = config->second.gyro_deadzone_degrees * 3.14159265358979323846f / 180.0f;
++						game_period_ns = static_cast<uint64>(config->second.calibration_period_seconds * 1000000000.0f);
++					}
++					auto restart_game_calibration = [&]() {
++						state.game_calibration_start = ts;
++						state.game_calibration_sum = game_gyro_raw;
++						state.game_calibration_count = 1;
++					};
++					if (game_period_ns == 0)
++					{
++						state.game_gyro_bias = {};
++						state.game_calibration_count = 0;
++						state.game_calibration_start = 0;
++						state.game_calibration_stable = true;
++						state.game_calibration_complete = true;
++						state.game_sample_rate_hz = 0.0f;
++					}
++					else if (state.game_calibration_count == 0)
++					{
++						state.game_calibration_stable = false;
++						restart_game_calibration();
++					}
++					else
++					{
++						const uint64 elapsed_ns = ts - state.game_calibration_start;
++						const double elapsed_s = static_cast<double>(elapsed_ns) / 1000000000.0;
++						const glm::vec3 mean = state.game_calibration_sum / static_cast<float>(state.game_calibration_count);
++						const glm::vec3 difference = game_gyro_raw - mean;
++						const double frequency = elapsed_s > 0.0 ? static_cast<double>(state.game_calibration_count) / elapsed_s : kV21MinCalibrationHz;
++						state.game_sample_rate_hz = static_cast<float>(frequency);
++						const bool unstable = std::abs(difference.x) > game_deadzone ||
++							std::abs(difference.y) > game_deadzone ||
++							std::abs(difference.z) > game_deadzone ||
++							frequency < kV21MinCalibrationHz;
++						state.game_calibration_stable = !unstable;
++						if (unstable)
++						{
++							// Keep the last valid bias while moving; only restart the candidate window.
++							restart_game_calibration();
++						}
++						else
++						{
++							state.game_calibration_sum += game_gyro_raw;
++							++state.game_calibration_count;
++							if (elapsed_ns >= game_period_ns)
++							{
++								state.game_gyro_bias = state.game_calibration_sum / static_cast<float>(state.game_calibration_count);
++								state.game_calibration_complete = true;
++							}
++						}
++					}
++					glm::vec3 game_gyro = game_gyro_raw - state.game_gyro_bias;
++					if (std::abs(game_gyro.x) <= game_deadzone) game_gyro.x = 0.0f;
++					if (std::abs(game_gyro.y) <= game_deadzone) game_gyro.y = 0.0f;
++					if (std::abs(game_gyro.z) <= game_deadzone) game_gyro.z = 0.0f;
++					tracking.gyro = game_gyro;
++				}
++				else
++				{
++					tracking.gyro[0] = sensor_data[0];
++					tracking.gyro[1] = -sensor_data[1];
++					tracking.gyro[2] = -sensor_data[2];
++				}
+ 				tracking.hasGyro = true;
+ 			}
+ 			if (tracking.hasAcc && tracking.hasGyro)
+ 			{
++				// Live game-motion view shows the exact values delivered to Cemu/KPAD.
++				// The pointer debug view remains the independent Dolphin stream.
++				state.dolphin_motion_acc = glm::vec3{ tracking.acc.x, -tracking.acc.y, -tracking.acc.z };
++				state.dolphin_motion_gyro = tracking.gyro;
++
+ 				auto ts = std::max(tracking.lastTimestampGyro, tracking.lastTimestampAccel);
+ 
+ 				if (ts > tracking.lastTimestampIntegrate)
+@@ -271,7 +635,12 @@ void SDLControllerProvider::HandleSDLEvent(SDL_Event& event)
+ 						tsDifD = 1.0f;
+ 					}
+ 
+-					state.handler.processMotionSample(tsDifD, tracking.gyro.x, tracking.gyro.y, tracking.gyro.z, tracking.acc.x, -tracking.acc.y, -tracking.acc.z);
++					// V14: all game motion uses Cemu's proven V9 adapter contract. Never
++					// feed Dolphin binding-semantic axes directly into WiiUMotionHandler.
++					if (s_joycon_orientation_states.contains(id))
++						state.handler.processCalibratedMotionSample(tsDifD, tracking.gyro.x, tracking.gyro.y, tracking.gyro.z, tracking.acc.x, -tracking.acc.y, -tracking.acc.z);
++					else
++						state.handler.processMotionSample(tsDifD, tracking.gyro.x, tracking.gyro.y, tracking.gyro.z, tracking.acc.x, -tracking.acc.y, -tracking.acc.z);
+ 					state.data = state.handler.getMotionSample();
+ 				}
+ 
+diff --git a/src/input/api/SDL/SDLControllerProvider.h b/src/input/api/SDL/SDLControllerProvider.h
+index e67eb06..b20eda3 100644
+--- a/src/input/api/SDL/SDLControllerProvider.h
++++ b/src/input/api/SDL/SDLControllerProvider.h
+@@ -12,6 +12,27 @@ class SDLControllerProvider : public ControllerProviderBase
+ {
+ 	friend class SDLController;
+ public:
++	struct DolphinMotionDebug
++	{
++		glm::vec3 gyro{};
++		glm::vec3 accel{};
++		glm::vec3 bias{};
++		float calibration_progress{};
++		float sample_rate_hz{};
++		float gyro_deadzone_degrees{ 2.0f };
++		// Existing fields below describe POINTER calibration in V21.
++		float calibration_period_seconds{ 3.0f };
++		glm::vec3 game_bias{};
++		float game_calibration_progress{};
++		float game_sample_rate_hz{};
++		float game_calibration_period_seconds{ 3.0f };
++		bool game_stable{};
++		bool game_calibrated{};
++		bool stable{};
++		bool calibrated{};
++		uint64 timestamp{};
++	};
++
+ 	SDLControllerProvider();
+ 	~SDLControllerProvider();
+ 
+@@ -23,6 +44,13 @@ public:
+ 	int get_index(size_t guid_index, const SDL_GUID& guid) const;
+ 
+ 	MotionSample motion_sample(SDL_JoystickID diid);
++	bool dolphin_pointer_motion(SDL_JoystickID diid, glm::vec3& gyro, glm::vec3& accel, uint64& timestamp);
++	bool dolphin_motion_debug(SDL_JoystickID diid, DolphinMotionDebug& debug);
++	void set_joycon_orientation(SDL_JoystickID diid, bool is_left, bool vertical);
++	void set_joycon_motion_scale(SDL_JoystickID diid, float x, float y, float z);
++	void set_joycon_dolphin_motion_settings(SDL_JoystickID diid, float gyro_deadzone_degrees, float calibration_period_seconds);
++	void set_joycon_pointer_calibration_period(SDL_JoystickID diid, float calibration_period_seconds);
++	void clear_joycon_orientation(SDL_JoystickID diid);
+ 
+ 	// exposed for manual event handling on macOS
+ #if BOOST_OS_MACOS
+@@ -62,8 +90,52 @@ private:
+ 		MotionSample data;
+ 		MotionInfoTracking tracking;
+ 
++		// Dolphin 2606a-compatible IMU state. The pointer stream is captured
++		// before emulated Wiimote orientation (including the R 180-degree fix).
++		glm::vec3 dolphin_pointer_gyro{};
++		glm::vec3 dolphin_pointer_acc{};
++		uint64 dolphin_pointer_timestamp{};
++		bool dolphin_pointer_has_gyro{};
++		bool dolphin_pointer_has_acc{};
++
++		// Dolphin IMUGyroscope stable-mean calibration state.
++		glm::vec3 dolphin_gyro_bias{};
++		glm::vec3 dolphin_calibration_sum{};
++		uint64 dolphin_calibration_count{};
++		uint64 dolphin_calibration_start{};
++		bool dolphin_calibration_initialized{};
++		bool dolphin_calibration_stable{};
++		bool dolphin_calibration_complete{};
++		float dolphin_sample_rate_hz{};
++		glm::vec3 dolphin_motion_gyro{};
++		glm::vec3 dolphin_motion_acc{};
++
++		// V21 game-gyro calibration state. This is deliberately separate from
++		// the Dolphin/pointer calibration state above.
++		glm::vec3 game_gyro_bias{};
++		glm::vec3 game_calibration_sum{};
++		uint64 game_calibration_count{};
++		uint64 game_calibration_start{};
++		bool game_calibration_stable{};
++		bool game_calibration_complete{};
++		float game_sample_rate_hz{};
++
+ 		MotionState() = default;
+ 	};
+ 
++	struct JoyConOrientationState
++	{
++		bool is_left{};
++		bool vertical{};
++		float motion_scale_x{ 1.0f };
++		float motion_scale_y{ 1.0f };
++		float motion_scale_z{ 1.0f };
++		float gyro_deadzone_degrees{ 2.0f };
++		// Game gyro and pointer use separate stable-window timers.
++		float calibration_period_seconds{ 3.0f };
++		float pointer_calibration_period_seconds{ 3.0f };
++	};
++
+ 	inline static std::unordered_map<SDL_JoystickID, MotionState> s_motion_states{};
++	inline static std::unordered_map<SDL_JoystickID, JoyConOrientationState> s_joycon_orientation_states{};
+ };
+diff --git a/src/input/emulated/WPADController.cpp b/src/input/emulated/WPADController.cpp
+index 2eae0f8..332a577 100644
+--- a/src/input/emulated/WPADController.cpp
++++ b/src/input/emulated/WPADController.cpp
+@@ -1,5 +1,9 @@
+ #include <api/Controller.h>
+ #include "input/emulated/WPADController.h"
++#include "Cafe/CafeSystem.h"
++#include "input/api/SDL/SDLController.h"
++
++#include <cmath>
+ 
+ #include "input/emulated/ClassicController.h"
+ #include "input/emulated/ProController.h"
+@@ -10,6 +14,26 @@ WPADController::WPADController(size_t player_index, WPADDataFormat data_format)
+ {
+ }
+ 
++
++bool WPADController::update_joycon_pointer(glm::vec2& position, glm::vec2& previous)
++{
++	std::shared_ptr<SDLController> joycon;
++	{
++		std::shared_lock lock(m_mutex);
++		for (const auto& controller : m_controllers)
++		{
++			auto candidate = std::dynamic_pointer_cast<SDLController>(controller);
++			if (candidate && candidate->is_joycon() && candidate->use_motion())
++			{
++				joycon = std::move(candidate);
++				break;
++			}
++		}
++	}
++
++	return joycon && joycon->update_joycon_pointer(position, previous);
++}
++
+ WPADDataFormat WPADController::get_default_data_format() const
+ {
+ 	switch (get_device_type())
+@@ -80,7 +104,10 @@ void WPADController::WPADRead(WPADStatus_t* status)
+ 
+ 	m_homebutton_down |= is_home_down();
+ 
+-	// todo fill position api from wiimote
++	// Joy-Con has no physical IR camera, so synthesize two sensor-bar dots
++	// around the gyro pointer for games that read raw WPAD DPD objects.
++	glm::vec2 joycon_pointer{}, joycon_pointer_prev{};
++	const bool has_joycon_pointer = update_joycon_pointer(joycon_pointer, joycon_pointer_prev);
+ 
+ 	switch (m_data_format)
+ 	{
+@@ -175,6 +202,29 @@ void WPADController::WPADRead(WPADStatus_t* status)
+ 		cemu_assert(false);
+ 	}
+ 
++	if (has_joycon_pointer)
++	{
++		for (auto& object : status->obj)
++		{
++			object.x = 0x03FF;
++			object.y = 0x03FF;
++			object.size = 0;
++			object.traceId = 0xFF;
++		}
++
++		const int center_x = std::clamp((int)std::lround(joycon_pointer.x * 1023.0f), 0, 1023);
++		const int center_y = std::clamp((int)std::lround(joycon_pointer.y * 767.0f), 0, 767);
++		constexpr int half_bar_width = 36;
++		status->obj[0].x = (uint16)std::clamp(center_x - half_bar_width, 0, 1023);
++		status->obj[0].y = (uint16)center_y;
++		status->obj[0].size = 8;
++		status->obj[0].traceId = 0;
++		status->obj[1].x = (uint16)std::clamp(center_x + half_bar_width, 0, 1023);
++		status->obj[1].y = (uint16)center_y;
++		status->obj[1].size = 8;
++		status->obj[1].traceId = 1;
++	}
++
+ 	status->dev = get_device_type();
+ 	status->err = WPAD_ERR_NONE;
+ }
+@@ -262,6 +312,48 @@ void WPADController::KPADRead(KPADStatus_t& status, const BtnRepeat& repeat)
+ 
+ 		glm::vec3 acc;
+ 		motion_sample.getAccelerometer(&acc[0]);
++
++		// V25 is deliberately restricted to Mario Kart 8 + emulated Wiimote +
++		// MotionPlus OFF + an SDL Joy-Con source. V22 remains untouched for every
++		// other title and every non-KPAD motion consumer.
++		const uint64 foreground_title = CafeSystem::GetForegroundTitleId();
++		const bool is_mario_kart_8 =
++			foreground_title == 0x000500001010EB00ULL ||
++			foreground_title == 0x000500001010EC00ULL ||
++			foreground_title == 0x000500001010ED00ULL;
++
++		bool joycon_left = false;
++		bool joycon_right = false;
++		for (const auto& source_controller : get_controllers())
++		{
++			if (!source_controller)
++				continue;
++			const auto& source_name = source_controller->display_name();
++			if (source_name.find("Joy-Con") == std::string::npos)
++				continue;
++			joycon_left |= source_name.find("(L)") != std::string::npos;
++			joycon_right |= source_name.find("(R)") != std::string::npos;
++		}
++
++		if (type() == Wiimote && !is_mpls_attached() && is_mario_kart_8 && (joycon_left || joycon_right))
++		{
++			// Hardware result: on the Vertical->horizontal-wheel route, Joy-Con L
++			// reaches the same physical basis as R only after a 180-degree turn.
++			// Reproduce that turn inside Mario Kart KPAD only.
++			if (joycon_left && !joycon_right)
++			{
++				acc.x = -acc.x;
++				acc.z = -acc.z;
++			}
++
++			// Reproduce V24-A's hardware-proven plane conversion: +90 around KPAD Y.
++			const float pre_quarter_x = acc.x;
++			acc.x = acc.z;
++			acc.z = -pre_quarter_x;
++			// V25-Z: single-axis steering mirror after the proven V24-A plane transform.
++			acc.z = -acc.z;
++		}
++
+ 		status.acc.x = acc.x;
+ 		status.acc.y = acc.y;
+ 		status.acc.z = acc.z;
+@@ -274,6 +366,9 @@ void WPADController::KPADRead(KPADStatus_t& status, const BtnRepeat& repeat)
+ 		//status.acc_vertical.x = acc_vert.x;
+ 		//status.acc_vertical.y = acc_vert.y;
+ 
++		// V16 restores the exact V7/upstream Cemu KPAD down contract.
++		// X is the non-negative horizontal magnitude; Y retains signed roll.
++		// Mario Kart consumed this exact pair correctly in the known-good builds.
+ 		status.accVertical.x = std::min(1.0f, std::abs(acc.x + acc.y));
+ 		status.accVertical.y = std::min(std::max(-1.0f, -acc.z), 1.0f);
+ 
+@@ -329,7 +424,22 @@ void WPADController::KPADRead(KPADStatus_t& status, const BtnRepeat& repeat)
+ 		status.speed = glm::length(delta);
+ 	}
+ 	else
+-		status.dpd_valid_fg = 0;
++	{
++		glm::vec2 position{}, previous{};
++		if (update_joycon_pointer(position, previous))
++		{
++			status.dpd_valid_fg = 2;
++			const auto pos = (position * 2.0f) - 1.0f;
++			status.pos.x = pos.x;
++			status.pos.y = pos.y;
++			const auto delta = position - previous;
++			status.vec.x = delta.x;
++			status.vec.y = delta.y;
++			status.speed = glm::length(delta);
++		}
++		else
++			status.dpd_valid_fg = 0;
++	}
+ 
+ 	switch (type())
+ 	{
+diff --git a/src/input/emulated/WPADController.h b/src/input/emulated/WPADController.h
+index 39df509..4f75a17 100644
+--- a/src/input/emulated/WPADController.h
++++ b/src/input/emulated/WPADController.h
+@@ -137,6 +137,15 @@ protected:
+ 	WPADDataFormat m_data_format;
+ 
+ private:
++	bool update_joycon_pointer(glm::vec2& position, glm::vec2& previous);
++
++	glm::vec2 m_joycon_pointer{ 0.5f, 0.5f };
++	glm::vec2 m_joycon_pointer_prev{ 0.5f, 0.5f };
++	std::chrono::steady_clock::time_point m_joycon_pointer_last_update{};
++	bool m_joycon_pointer_initialized = false;
++	std::string m_joycon_pointer_uuid{};
++	uint8 m_joycon_pointer_orientation = 0xFF;
++
+ 	uint32be m_last_holdvalue = 0;
+ 
+ 	std::chrono::steady_clock::time_point m_last_hold_change{}, m_last_pulse{};
+diff --git a/src/input/motion/Mahony.h b/src/input/motion/Mahony.h
+index 340282b..e4cc29d 100644
+--- a/src/input/motion/Mahony.h
++++ b/src/input/motion/Mahony.h
+@@ -16,40 +16,16 @@ public:
+ 	// gx, gy, gz are in radians/sec
+ 	void updateIMU(float deltaTime, float gx, float gy, float gz, float ax, float ay, float az)
+ 	{
+-		Vector3f av(ax, ay, az);
+-		Vector3f gv(gx, gy, gz);
+-		if (deltaTime > 0.2f)
+-			deltaTime = 0.2f; // dont let stutter mess up the internal state
+-		updateGyroBias(gx, gy, gz);
+-		gv.x -= m_gyroBias[0];
+-		gv.y -= m_gyroBias[1];
+-		gv.z -= m_gyroBias[2];
+-
+-		// ignore small angles to avoid drift due to bias (especially on yaw)
+-		if (fabs(gv.x) < 0.015f)
+-			gv.x = 0.0f;
+-		if (fabs(gv.y) < 0.015f)
+-			gv.y = 0.0f;
+-		if (fabs(gv.z) < 0.015f)
+-			gv.z = 0.0f;
+-
+-		// cemuLog_logDebug(LogType::Force, "[IMU Quat] time {:7.4} | {:7.2} {:7.2} {:7.2} {:7.2} | gyro( - bias) {:7.4} {:7.4} {:7.4} | acc {:7.2} {:7.2} {:7.2} | GyroBias {:7.4} {:7.4} {:7.4}", deltaTime, m_imuQ.x, m_imuQ.y, m_imuQ.z, m_imuQ.w, gv.x, gv.y, gv.z, ax, ay, az, m_gyroBias[0], m_gyroBias[1], m_gyroBias[2]);
++		updateIMUInternal(deltaTime, gx, gy, gz, ax, ay, az, true);
++	}
+ 
+-		if (fabs(av.x) > 0.000001f || fabs(av.y) > 0.000001f || fabs(av.z) > 0.000001f)
+-		{
+-			av.Normalize();
+-			Vector3f grav = m_imuQ.GetVectorZ();
+-			grav.Scale(0.5f);
+-			Vector3f errorFeedback = grav.Cross(av);
+-			// apply scaled feedback
+-			gv -= errorFeedback;
+-		}
+-		gv.Scale(0.5f * deltaTime);
+-		m_imuQ += (m_imuQ * Quaternionf(0.0f, gv.x, gv.y, gv.z));
+-		m_imuQ.NormalizeXYZW();
+-		updateOrientationAngles();
++	// V21: input gyro has already been debiased by the per-Joy-Con stable mean.
++	void updateIMUCalibrated(float deltaTime, float gx, float gy, float gz, float ax, float ay, float az)
++	{
++		updateIMUInternal(deltaTime, gx, gy, gz, ax, ay, az, false);
+ 	}
+ 
++
+ 	float getRollRadians()
+ 	{
+ 		return m_roll + (float)m_rollWinding * 2.0f * 3.14159265f;
+@@ -82,6 +58,43 @@ public:
+ 
+ private:
+ 
++	void updateIMUInternal(float deltaTime, float gx, float gy, float gz, float ax, float ay, float az, bool learn_internal_bias)
++	{
++		Vector3f av(ax, ay, az);
++		Vector3f gv(gx, gy, gz);
++		if (deltaTime > 0.2f)
++			deltaTime = 0.2f;
++		if (learn_internal_bias)
++		{
++			updateGyroBias(gx, gy, gz);
++			gv.x -= m_gyroBias[0];
++			gv.y -= m_gyroBias[1];
++			gv.z -= m_gyroBias[2];
++		}
++
++		// Preserve upstream Cemu's small-angle protection. V21's configurable
++		// Joy-Con deadzone has already run before the calibrated entry point.
++		if (fabs(gv.x) < 0.015f)
++			gv.x = 0.0f;
++		if (fabs(gv.y) < 0.015f)
++			gv.y = 0.0f;
++		if (fabs(gv.z) < 0.015f)
++			gv.z = 0.0f;
++
++		if (fabs(av.x) > 0.000001f || fabs(av.y) > 0.000001f || fabs(av.z) > 0.000001f)
++		{
++			av.Normalize();
++			Vector3f grav = m_imuQ.GetVectorZ();
++			grav.Scale(0.5f);
++			Vector3f errorFeedback = grav.Cross(av);
++			gv -= errorFeedback;
++		}
++		gv.Scale(0.5f * deltaTime);
++		m_imuQ += (m_imuQ * Quaternionf(0.0f, gv.x, gv.y, gv.z));
++		m_imuQ.NormalizeXYZW();
++		updateOrientationAngles();
++	}
++
+ 	// calculate roll, yaw and pitch in radians. (-0.5 to 0.5)
+ 	void calcOrientation()
+ 	{
+diff --git a/src/input/motion/MotionHandler.h b/src/input/motion/MotionHandler.h
+index b7cf4ee..0c8a395 100644
+--- a/src/input/motion/MotionHandler.h
++++ b/src/input/motion/MotionHandler.h
+@@ -12,6 +12,7 @@ public:
+ 		float gx, float gy, float gz,
+ 		float accx, float accy, float accz)
+ 	{
++		m_gyroAlreadyCalibrated = false;
+ 		m_gyro[0] = gx;
+ 		m_gyro[1] = gy;
+ 		m_gyro[2] = gz;
+@@ -30,6 +31,52 @@ public:
+ 		m_orientation[2] = _radToOrientation(m_imu.getRollRadians());
+ 	}
+ 
++	// V10 Joy-Con path: gyro is already bias-corrected and deadzoned exactly like
++	// Dolphin 2606a. Keep Cemu's attitude adapter for KPAD/VPAD structures, but do
++	// not subtract another Cemu gyro bias from the physical motion values.
++	void processDolphinMotionSample(
++		float deltaTime,
++		float gx, float gy, float gz,
++		float accx, float accy, float accz)
++	{
++		m_gyroAlreadyCalibrated = true;
++		m_gyro[0] = gx;
++		m_gyro[1] = gy;
++		m_gyro[2] = gz;
++		m_prevAcc[0] = m_acc[0];
++		m_prevAcc[1] = m_acc[1];
++		m_prevAcc[2] = m_acc[2];
++		m_acc[0] = accx;
++		m_acc[1] = accy;
++		m_acc[2] = accz;
++		m_imu.updateIMU(deltaTime, gx, gy, gz, accx, accy, accz);
++		m_orientation[0] = _radToOrientation(-m_imu.getYawRadians()) - 0.50f;
++		m_orientation[1] = _radToOrientation(-m_imu.getPitchRadians()) - 0.50f;
++		m_orientation[2] = _radToOrientation(m_imu.getRollRadians());
++	}
++
++	// V21 Joy-Con path: provider already performed per-device gyro calibration.
++	void processCalibratedMotionSample(
++		float deltaTime,
++		float gx, float gy, float gz,
++		float accx, float accy, float accz)
++	{
++		m_gyro[0] = gx;
++		m_gyro[1] = gy;
++		m_gyro[2] = gz;
++		m_prevAcc[0] = m_acc[0];
++		m_prevAcc[1] = m_acc[1];
++		m_prevAcc[2] = m_acc[2];
++		m_acc[0] = accx;
++		m_acc[1] = accy;
++		m_acc[2] = accz;
++		m_imu.updateIMUCalibrated(deltaTime, gx, gy, gz, accx, accy, accz);
++
++		m_orientation[0] = _radToOrientation(-m_imu.getYawRadians()) - 0.50f;
++		m_orientation[1] = _radToOrientation(-m_imu.getPitchRadians()) - 0.50f;
++		m_orientation[2] = _radToOrientation(m_imu.getRollRadians());
++	}
++
+ 	MotionSample getMotionSample()
+ 	{
+ 		float q[4];
+@@ -37,9 +84,18 @@ public:
+ 		float gBias[3];
+ 		m_imu.getGyroBias(gBias);
+ 		float gyroDebiased[3];
+-		gyroDebiased[0] = m_gyro[0] - gBias[0];
+-		gyroDebiased[1] = m_gyro[1] - gBias[1];
+-		gyroDebiased[2] = m_gyro[2] - gBias[2];
++		if (m_gyroAlreadyCalibrated)
++		{
++			gyroDebiased[0] = m_gyro[0];
++			gyroDebiased[1] = m_gyro[1];
++			gyroDebiased[2] = m_gyro[2];
++		}
++		else
++		{
++			gyroDebiased[0] = m_gyro[0] - gBias[0];
++			gyroDebiased[1] = m_gyro[1] - gBias[1];
++			gyroDebiased[2] = m_gyro[2] - gBias[2];
++		}
+ 		return MotionSample(m_acc, MotionSample::calculateAccAcceleration(m_prevAcc, m_acc), gyroDebiased, m_orientation, q);
+ 	}
+ private:
+@@ -57,4 +113,5 @@ private:
+ 	float m_prevAcc[3]{};
+ 	// calculated values
+ 	float m_orientation[3]{};
++	bool m_gyroAlreadyCalibrated{};
+ };
+\ No newline at end of file
