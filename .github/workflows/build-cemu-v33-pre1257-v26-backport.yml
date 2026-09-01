@@ -1,4 +1,4 @@
-name: Build V33 PRE-1257 + V26 Final Backport
+name: Build V33 PRE-1257 + V26 Runtime Backport
 
 on:
   push:
@@ -16,7 +16,6 @@ env:
   VCPKG_BINARY_SOURCES: clear
   VCPKG_FORCE_DOWNLOADED_BINARIES: true
   PRE1257_COMMIT: 4b9c7c0d307495c679127381d6f00bab9f0c2933
-  V26_BASE_COMMIT: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
 
 jobs:
   build-windows-x64:
@@ -47,38 +46,46 @@ jobs:
           if ($h264 -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "PRE H264 mismatch: $h264" }
           Write-Host "Exact PRE-1257 base verified: $head"
 
-      - name: Fetch V26 source base for three-way merge
+      - name: Generate manual V26 runtime backport for PRE SDL2
         shell: pwsh
         run: |
-          git -C cemu fetch origin $env:V26_BASE_COMMIT --depth=1
-          git -C cemu rev-parse FETCH_HEAD
-
-      - name: Three-way backport exact V26 final patch
-        shell: pwsh
-        run: |
-          $patch = (Resolve-Path "wrapper\generated\v26-final\V26-FINAL.patch").Path
-          git -C cemu apply --3way --whitespace=nowarn $patch
-          $applyExit = $LASTEXITCODE
-          Write-Host "--- BACKPORT STATUS ---"
+          python wrapper\tools\apply_cemu_v33_pre1257_v26_runtime.py cemu --wrapper wrapper
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "--- V33 RUNTIME BACKPORT DIFF ---"
           git -C cemu status --short
-          if ($applyExit -ne 0) {
-            Write-Host "--- TRUE CONFLICTS ---"
-            git -C cemu diff --name-only --diff-filter=U
-            Write-Host "--- CONFLICT DIFF ---"
-            git -C cemu diff --cc
-            exit $applyExit
-          }
           git -C cemu diff --check
 
-      - name: Verify all V26 final files are represented
+      - name: Verify V26 runtime core and isolation
         shell: pwsh
         run: |
-          $manifest = Get-Content wrapper\generated\v26-final\MANIFEST.txt | Where-Object { $_.Trim() -ne "" }
-          $changed = git -C cemu diff --name-only HEAD
-          foreach ($file in $manifest) {
-            if ($changed -notcontains $file) { throw "V26 final file missing from backport diff: $file" }
+          $required = @(
+            "src/input/api/SDL/SDLController.cpp",
+            "src/input/api/SDL/SDLController.h",
+            "src/input/api/SDL/SDLControllerProvider.cpp",
+            "src/input/api/SDL/SDLControllerProvider.h",
+            "src/input/emulated/WPADController.cpp",
+            "src/input/emulated/WPADController.h",
+            "src/input/motion/Mahony.h",
+            "src/input/motion/MotionHandler.h"
+          )
+          $changed = @(git -C cemu diff --name-only HEAD)
+          foreach ($file in $required) {
+            if ($changed -notcontains $file) { throw "Runtime backport file missing from diff: $file" }
           }
-          Write-Host "All $($manifest.Count) V26 final files are present in the PRE backport diff."
+          if ($changed.Count -ne $required.Count) {
+            Write-Host "Changed files:"; $changed | ForEach-Object { Write-Host $_ }
+            throw "Diagnostic isolation violated: expected exactly $($required.Count) runtime files, got $($changed.Count)"
+          }
+          $provider = Get-Content cemu\src\input\api\SDL\SDLControllerProvider.cpp -Raw
+          $controller = Get-Content cemu\src\input\api\SDL\SDLController.cpp -Raw
+          $wpad = Get-Content cemu\src\input\emulated\WPADController.cpp -Raw
+          if ($provider -notmatch "dolphin_pointer_motion") { throw "V26 pointer provider missing" }
+          if ($provider -notmatch "processCalibratedMotionSample") { throw "V26 calibrated Joy-Con path missing" }
+          if ($controller -notmatch "joycon_pointer_calibration_period_s") { throw "V26 profile compatibility missing" }
+          if ($controller -notmatch "V26: V5's legacy hotkey swap") { throw "V26 hotkey semantics missing" }
+          if ($wpad -notmatch "update_joycon_pointer") { throw "V26 WPAD pointer path missing" }
+          if ($provider -match "SDL3/" -or $controller -match "SDL3/") { throw "SDL3 include leaked into PRE build" }
+          Write-Host "V26 runtime core present; GUI/LatteTiming intentionally excluded from this diagnostic."
 
       - name: Verify PRE H264 stayed byte-identical
         shell: pwsh
@@ -117,7 +124,7 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Package V33
+      - name: Package V33 runtime diagnostic
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
@@ -125,24 +132,27 @@ jobs:
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item $exe "package\Cemu.exe" -Force
           @"
-          Cemu V33 - PRE-1257 Wii Party U Core + Exact V26 Final Input Backport
-          ======================================================================
-          Wii Party U core: exact PRE-1257 commit 4b9c7c0d307495c679127381d6f00bab9f0c2933
-          Input target: exact final V26 13-file snapshot, three-way backported.
-          H264Dec.cpp remains byte-identical to PRE-1257.
+          Cemu V33 - PRE-1257 Wii Party U Core + V26 Runtime Core
+          =======================================================
+          Base: exact known-good PRE-1257 commit 4b9c7c0d307495c679127381d6f00bab9f0c2933
+          H264Dec.cpp: byte-identical to PRE-1257.
+          V26 runtime backport: SDL Joy-Con engine, profile state/hotkeys, Dolphin pointer,
+          WPAD/KPAD integration, Mahony/calibrated motion.
+          SDL3 V26 input code is manually adapted to PRE's SDL2 APIs and millisecond timestamps.
+          GUI/LatteTiming are intentionally NOT in this diagnostic build yet.
 
           Test by replacing only Cemu.exe inside the existing V26 portable folder.
-          Keep controller profiles/settings/mlc01 unchanged.
+          Keep controller profiles/settings/mlc01 unchanged so the V26 XML profile values are reused.
           "@ | Set-Content "package\README-V33.txt" -Encoding utf8
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
-          Compress-Archive -Path "package\*" -DestinationPath "Cemu-V33-PRE1257-V26-Backport-Windows-x64.zip" -CompressionLevel Optimal -Force
+          Compress-Archive -Path "package\*" -DestinationPath "Cemu-V33-PRE1257-V26-Runtime-Windows-x64.zip" -CompressionLevel Optimal -Force
           Write-Host "V33 SHA-256: $hash"
 
       - name: Upload V33 Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-V33-PRE1257-V26-Backport-Windows-x64
-          path: Cemu-V33-PRE1257-V26-Backport-Windows-x64.zip
+          name: Cemu-V33-PRE1257-V26-Runtime-Windows-x64
+          path: Cemu-V33-PRE1257-V26-Runtime-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
