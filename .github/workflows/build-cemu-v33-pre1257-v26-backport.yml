@@ -1,0 +1,148 @@
+name: Build V33 PRE-1257 + V26 Final Backport
+
+on:
+  push:
+    branches: [wii-party-u-v33-pre1257-v26-backport]
+    paths:
+      - ".github/workflows/build-cemu-v33-pre1257-v26-backport.yml"
+      - "generated/v26-final/**"
+      - "tools/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_BINARY_SOURCES: clear
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+  PRE1257_COMMIT: 4b9c7c0d307495c679127381d6f00bab9f0c2933
+  V26_BASE_COMMIT: f6a8883d2913be1b0f06ef7065f1bf1fab800b43
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout wrapper V33
+        uses: actions/checkout@v6
+        with:
+          ref: wii-party-u-v33-pre1257-v26-backport
+          path: wrapper
+
+      - name: Checkout exact PRE-1257 Cemu
+        uses: actions/checkout@v6
+        with:
+          repository: cemu-project/Cemu
+          ref: 4b9c7c0d307495c679127381d6f00bab9f0c2933
+          path: cemu
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify exact Wii Party U known-good base
+        shell: pwsh
+        run: |
+          $head = (git -C cemu rev-parse HEAD).Trim()
+          if ($head -ne $env:PRE1257_COMMIT) { throw "Wrong Cemu base: $head" }
+          $h264 = (git -C cemu hash-object src/Cafe/OS/libs/h264_avc/H264Dec.cpp).Trim()
+          if ($h264 -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "PRE H264 mismatch: $h264" }
+          Write-Host "Exact PRE-1257 base verified: $head"
+
+      - name: Fetch V26 source base for three-way merge
+        shell: pwsh
+        run: |
+          git -C cemu fetch origin $env:V26_BASE_COMMIT --depth=1
+          git -C cemu rev-parse FETCH_HEAD
+
+      - name: Three-way backport exact V26 final patch
+        shell: pwsh
+        run: |
+          $patch = (Resolve-Path "wrapper\generated\v26-final\V26-FINAL.patch").Path
+          git -C cemu apply --3way --whitespace=nowarn $patch
+          $applyExit = $LASTEXITCODE
+          Write-Host "--- BACKPORT STATUS ---"
+          git -C cemu status --short
+          if ($applyExit -ne 0) {
+            Write-Host "--- TRUE CONFLICTS ---"
+            git -C cemu diff --name-only --diff-filter=U
+            Write-Host "--- CONFLICT DIFF ---"
+            git -C cemu diff --cc
+            exit $applyExit
+          }
+          git -C cemu diff --check
+
+      - name: Verify all V26 final files are represented
+        shell: pwsh
+        run: |
+          $manifest = Get-Content wrapper\generated\v26-final\MANIFEST.txt | Where-Object { $_.Trim() -ne "" }
+          $changed = git -C cemu diff --name-only HEAD
+          foreach ($file in $manifest) {
+            if ($changed -notcontains $file) { throw "V26 final file missing from backport diff: $file" }
+          }
+          Write-Host "All $($manifest.Count) V26 final files are present in the PRE backport diff."
+
+      - name: Verify PRE H264 stayed byte-identical
+        shell: pwsh
+        run: |
+          $h264 = (git -C cemu hash-object src/Cafe/OS/libs/h264_avc/H264Dec.cpp).Trim()
+          if ($h264 -ne "024965fd0b0d10611c9fb6e0a08ecd399865ec49") { throw "Backport touched PRE H264 core: $h264" }
+          if (Test-Path "cemu\src\Cafe\OS\libs\h264_avc\H264DecBackendAVC.cpp") { throw "Post-1257 H264 backend unexpectedly exists" }
+          if (Test-Path "cemu\src\Cafe\OS\libs\h264_avc\H264DecInternal.h") { throw "Post-1257 H264 internal header unexpectedly exists" }
+          Write-Host "PRE-1257 H264 core preserved byte-for-byte."
+
+      - name: Replace historical vcpkg toolchain only
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force cemu\dependencies\vcpkg
+          git clone https://github.com/microsoft/vcpkg.git cemu\dependencies\vcpkg
+          git -C cemu\dependencies\vcpkg checkout 2026.07.29
+          $baseline = "a4275b7eee79fb24ec2e135481ef5fce8b41c339"
+          git -C cemu\dependencies\vcpkg fetch origin $baseline
+          git -C cemu\dependencies\vcpkg rev-parse $baseline
+          Get-Content cemu\vcpkg.json | Select-String "builtin-baseline"
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\cemu\dependencies\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Configure Cemu Release
+        shell: pwsh
+        run: cmake -S cemu -B cemu/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build V33 Release
+        shell: pwsh
+        run: cmake --build cemu/build --config release
+
+      - name: Package V33
+        shell: pwsh
+        run: |
+          $exe = "cemu\bin\Cemu_release.exe"
+          if (-not (Test-Path $exe)) { throw "V33 Cemu executable was not produced" }
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe "package\Cemu.exe" -Force
+          @"
+          Cemu V33 - PRE-1257 Wii Party U Core + Exact V26 Final Input Backport
+          ======================================================================
+          Wii Party U core: exact PRE-1257 commit 4b9c7c0d307495c679127381d6f00bab9f0c2933
+          Input target: exact final V26 13-file snapshot, three-way backported.
+          H264Dec.cpp remains byte-identical to PRE-1257.
+
+          Test by replacing only Cemu.exe inside the existing V26 portable folder.
+          Keep controller profiles/settings/mlc01 unchanged.
+          "@ | Set-Content "package\README-V33.txt" -Encoding utf8
+          $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
+          "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
+          Compress-Archive -Path "package\*" -DestinationPath "Cemu-V33-PRE1257-V26-Backport-Windows-x64.zip" -CompressionLevel Optimal -Force
+          Write-Host "V33 SHA-256: $hash"
+
+      - name: Upload V33 Windows build
+        uses: actions/upload-artifact@v6
+        with:
+          name: Cemu-V33-PRE1257-V26-Backport-Windows-x64
+          path: Cemu-V33-PRE1257-V26-Backport-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
