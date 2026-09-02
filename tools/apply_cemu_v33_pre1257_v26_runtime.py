@@ -74,6 +74,30 @@ def adapt_sdl_controller_header(snapshot: Path, cemu: Path) -> None:
     ]
     for old, new in replacements:
         text = text.replace(old, new)
+    text = replace_exact(
+        text,
+        "\tenum class JoyConOrientation : uint8\n\t{\n\t\tSideways = 0,\n\t\tVertical = 1,\n\t};\n",
+        "\tenum class JoyConOrientation : uint8\n\t{\n\t\tSideways = 0,\n\t\tVertical = 1,\n\t};\n\n"
+        "\t// SDL2 can expose Joy-Cons under driver-specific generic names. Keep Auto,\n"
+        "\t// but allow an explicit per-profile side so the V26 stack is never hidden.\n"
+        "\tenum class JoyConSideOverride : uint8\n\t{\n\t\tAuto = 0,\n\t\tLeft = 1,\n\t\tRight = 2,\n\t};\n",
+        "add SDL2 Joy-Con side override type",
+    )
+    text = replace_exact(
+        text,
+        "\tbool is_joycon() const { return is_left_joycon() || is_right_joycon(); }\n",
+        "\tbool is_joycon() const { return is_left_joycon() || is_right_joycon(); }\n"
+        "\tJoyConSideOverride get_joycon_side_override() const { return m_joycon_side_override.load(std::memory_order_relaxed); }\n"
+        "\tvoid set_joycon_side_override(JoyConSideOverride side);\n",
+        "publish manual Joy-Con side selection",
+    )
+    text = replace_exact(
+        text,
+        "\tstd::atomic<JoyConOrientation> m_joycon_orientation{ JoyConOrientation::Sideways };\n",
+        "\tstd::atomic<JoyConOrientation> m_joycon_orientation{ JoyConOrientation::Sideways };\n"
+        "\tstd::atomic<JoyConSideOverride> m_joycon_side_override{ JoyConSideOverride::Auto };\n",
+        "store manual Joy-Con side selection",
+    )
     if "SDL3/" in text or "SDL_GUID" in text or "SDL_GAMEPAD_" in text:
         raise RuntimeError("Unadapted SDL3 tokens remain in SDLController.h")
     write_text(cemu / "src" / rel, text)
@@ -121,6 +145,130 @@ def adapt_sdl_controller_cpp(snapshot: Path, cemu: Path) -> None:
     ]
     for old, new in replacements:
         text = text.replace(old, new)
+
+    text = replace_exact(
+        text,
+        "#include <cmath>\n",
+        "#include <cmath>\n#include <cctype>\n",
+        "add case-insensitive SDL2 Joy-Con name support",
+    )
+
+    left_impl = r'''bool SDLController::is_left_joycon() const
+{
+	const auto side_override = get_joycon_side_override();
+	if (side_override == JoyConSideOverride::Left)
+		return true;
+	if (side_override == JoyConSideOverride::Right)
+		return false;
+
+	std::scoped_lock lock(m_controller_mutex);
+	if (m_controller)
+	{
+		const auto type = SDL_GameControllerGetType(m_controller);
+		if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT)
+			return true;
+		if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT)
+			return false;
+	}
+
+	std::string compact_name;
+	compact_name.reserve(m_display_name.size());
+	for (const unsigned char ch : m_display_name)
+	{
+		if (std::isalnum(ch))
+			compact_name.push_back(static_cast<char>(std::tolower(ch)));
+	}
+	const bool mentions_joycon = compact_name.find("joycon") != std::string::npos;
+	if (mentions_joycon && (compact_name.find("joyconleft") != std::string::npos ||
+		compact_name.find("leftjoycon") != std::string::npos || compact_name.ends_with("joyconl")))
+		return true;
+	if (mentions_joycon && (compact_name.find("joyconright") != std::string::npos ||
+		compact_name.find("rightjoycon") != std::string::npos || compact_name.ends_with("joyconr")))
+		return false;
+	return m_guid == kLeftJoyCon;
+}'''
+    right_impl = r'''bool SDLController::is_right_joycon() const
+{
+	const auto side_override = get_joycon_side_override();
+	if (side_override == JoyConSideOverride::Right)
+		return true;
+	if (side_override == JoyConSideOverride::Left)
+		return false;
+
+	std::scoped_lock lock(m_controller_mutex);
+	if (m_controller)
+	{
+		const auto type = SDL_GameControllerGetType(m_controller);
+		if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT)
+			return true;
+		if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT)
+			return false;
+	}
+
+	std::string compact_name;
+	compact_name.reserve(m_display_name.size());
+	for (const unsigned char ch : m_display_name)
+	{
+		if (std::isalnum(ch))
+			compact_name.push_back(static_cast<char>(std::tolower(ch)));
+	}
+	const bool mentions_joycon = compact_name.find("joycon") != std::string::npos;
+	if (mentions_joycon && (compact_name.find("joyconright") != std::string::npos ||
+		compact_name.find("rightjoycon") != std::string::npos || compact_name.ends_with("joyconr")))
+		return true;
+	if (mentions_joycon && (compact_name.find("joyconleft") != std::string::npos ||
+		compact_name.find("leftjoycon") != std::string::npos || compact_name.ends_with("joyconl")))
+		return false;
+	return m_guid == kRightJoyCon;
+}'''
+    text = replace_cpp_function(text, "bool SDLController::is_left_joycon() const", left_impl)
+    text = replace_cpp_function(text, "bool SDLController::is_right_joycon() const", right_impl)
+
+    side_override_impl = r'''void SDLController::set_joycon_side_override(JoyConSideOverride side)
+{
+	m_joycon_side_override.store(side, std::memory_order_relaxed);
+	if (!is_joycon() || m_diid < 0)
+		return;
+
+	const bool physical_vertical = get_joycon_orientation() == JoyConOrientation::Sideways;
+	m_provider->set_joycon_orientation(m_diid, is_left_joycon(), physical_vertical);
+	float scale_x, scale_y, scale_z;
+	get_motion_scale(scale_x, scale_y, scale_z);
+	m_provider->set_joycon_motion_scale(m_diid, scale_x, scale_y, scale_z);
+	m_provider->set_joycon_dolphin_motion_settings(m_diid,
+		m_dolphin_gyro_deadzone_degrees.load(std::memory_order_relaxed),
+		m_dolphin_calibration_period_seconds.load(std::memory_order_relaxed));
+	m_provider->set_joycon_pointer_calibration_period(m_diid,
+		m_pointer_calibration_period_seconds.load(std::memory_order_relaxed));
+}'''
+    text = replace_exact(
+        text,
+        "void SDLController::set_joycon_orientation(JoyConOrientation orientation, bool notify)\n",
+        side_override_impl + "\n\nvoid SDLController::set_joycon_orientation(JoyConOrientation orientation, bool notify)\n",
+        "implement manual Joy-Con side selection",
+    )
+
+    text = replace_exact(
+        text,
+        "\tbase_type::save(node);\n\tif (!is_joycon())\n",
+        "\tbase_type::save(node);\n"
+        "\tnode.append_child(\"joycon_side_override\").append_child(pugi::node_pcdata).set_value(fmt::format(\"{}\", (int)get_joycon_side_override()).c_str());\n"
+        "\tif (!is_joycon())\n",
+        "persist manual Joy-Con side",
+    )
+    text = replace_exact(
+        text,
+        "\tbase_type::load(node);\n\tif (!is_joycon())\n",
+        "\tbase_type::load(node);\n"
+        "\tif (const auto value = node.child(\"joycon_side_override\"))\n"
+        "\t{\n"
+        "\t\tconst int side = ConvertString<int>(value.child_value());\n"
+        "\t\tif (side >= (int)JoyConSideOverride::Auto && side <= (int)JoyConSideOverride::Right)\n"
+        "\t\t\tset_joycon_side_override((JoyConSideOverride)side);\n"
+        "\t}\n"
+        "\tif (!is_joycon())\n",
+        "load manual Joy-Con side before profile guard",
+    )
 
     # SDL2 sensor event timestamps are milliseconds; V26/SDL3 timestamps are ns.
     text = text.replace(
@@ -411,12 +559,67 @@ def adapt_wiimote_settings_gui(snapshot: Path, cemu: Path) -> None:
     timer_start = "\tInputPanel::on_timer(emulated_controller, controller);\n\n"
     timer_end = "\tif (emulated_controller)\n"
     timer_block = text_between(final_cpp, timer_start, timer_end, "extract V26 live Joy-Con UI refresh")
+    timer_block = replace_exact(
+        timer_block,
+        "\tif (joycon && joycon->is_joycon())\n",
+        "\t// Always expose the Joy-Con controls for an SDL device. PRE's SDL2 may\n"
+        "\t// report real Joy-Cons under a generic driver name; the Side selector\n"
+        "\t// below provides a deterministic per-profile override.\n"
+        "\tif (joycon)\n",
+        "show Joy-Con controls for every selected SDL device",
+    )
     cpp = replace_exact(cpp, timer_start, timer_block, "insert V26 live Joy-Con UI refresh")
 
     methods_start = "wxString WiimoteInputPanel::joycon_hotkey_label"
     methods_end = "void WiimoteInputPanel::load_controller"
     methods = text_between(final_cpp, methods_start, methods_end, "extract V26 Joy-Con settings methods")
+    methods = replace_exact(
+        methods,
+        "\tm_joycon_name->SetLabel(joycon->is_left_joycon() ? _(\"Joy-Con L\") : _(\"Joy-Con R\"));\n",
+        "\tconst auto side_override = joycon->get_joycon_side_override();\n"
+        "\tconst int side_selection = side_override == SDLController::JoyConSideOverride::Left ? 1 :\n"
+        "\t\t(side_override == SDLController::JoyConSideOverride::Right ? 2 : 0);\n"
+        "\tif (m_joycon_side->GetSelection() != side_selection) m_joycon_side->SetSelection(side_selection);\n"
+        "\tif (joycon->is_joycon())\n"
+        "\t\tm_joycon_name->SetLabel(joycon->is_left_joycon() ? _(\"Joy-Con L\") : _(\"Joy-Con R\"));\n"
+        "\telse\n"
+        "\t\tm_joycon_name->SetLabel(_(\"SDL device - choose Joy-Con side\"));\n",
+        "refresh manual Joy-Con side controls",
+    )
+    methods = replace_exact(
+        methods,
+        "void WiimoteInputPanel::on_joycon_orientation_change(wxCommandEvent&)\n",
+        "void WiimoteInputPanel::on_joycon_side_change(wxCommandEvent&)\n"
+        "{\n"
+        "\tif (const auto joycon = m_active_joycon.lock())\n"
+        "\t{\n"
+        "\t\tconst int selection = m_joycon_side->GetSelection();\n"
+        "\t\tjoycon->set_joycon_side_override(selection == 1 ? SDLController::JoyConSideOverride::Left :\n"
+        "\t\t\t(selection == 2 ? SDLController::JoyConSideOverride::Right : SDLController::JoyConSideOverride::Auto));\n"
+        "\t\tupdate_joycon_controls(joycon);\n"
+        "\t}\n"
+        "}\n\n"
+        "void WiimoteInputPanel::on_joycon_orientation_change(wxCommandEvent&)\n",
+        "handle manual Joy-Con side selection",
+    )
     cpp = replace_exact(cpp, methods_end, methods + methods_end, "insert V26 Joy-Con settings methods")
+
+    cpp = replace_exact(
+        cpp,
+        "\tjoycon_sizer->Add(m_joycon_name, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 10);\n"
+        "\tjoycon_sizer->Add(new wxStaticText(m_joycon_panel, wxID_ANY, _(\"Orientation:\")), 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);\n",
+        "\tjoycon_sizer->Add(m_joycon_name, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 10);\n"
+        "\tjoycon_sizer->Add(new wxStaticText(m_joycon_panel, wxID_ANY, _(\"Side:\")), 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);\n"
+        "\tm_joycon_side = new wxChoice(m_joycon_panel, wxID_ANY);\n"
+        "\tm_joycon_side->Append(_(\"Auto\"));\n"
+        "\tm_joycon_side->Append(_(\"Left\"));\n"
+        "\tm_joycon_side->Append(_(\"Right\"));\n"
+        "\tm_joycon_side->SetSelection(0);\n"
+        "\tm_joycon_side->Bind(wxEVT_CHOICE, &WiimoteInputPanel::on_joycon_side_change, this);\n"
+        "\tjoycon_sizer->Add(m_joycon_side, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 10);\n"
+        "\tjoycon_sizer->Add(new wxStaticText(m_joycon_panel, wxID_ANY, _(\"Orientation:\")), 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 5);\n",
+        "add manual Joy-Con side selector to PRE GUI",
+    )
     write_text(cpp_path, cpp)
 
     header_path = cemu / "src/gui/input/panels/WiimoteInputPanel.h"
@@ -433,6 +636,18 @@ def adapt_wiimote_settings_gui(snapshot: Path, cemu: Path) -> None:
     fields_start = "\tenum class JoyConHotkeyCapture"
     fields_end = "\tvoid add_button_row"
     fields = text_between(final_header, fields_start, fields_end, "extract V26 Joy-Con GUI state")
+    fields = replace_exact(
+        fields,
+        "\twxChoice* m_joycon_orientation = nullptr;\n",
+        "\twxChoice* m_joycon_side = nullptr;\n\twxChoice* m_joycon_orientation = nullptr;\n",
+        "store manual Joy-Con side selector",
+    )
+    fields = replace_exact(
+        fields,
+        "\tvoid on_joycon_orientation_change(wxCommandEvent& event);\n",
+        "\tvoid on_joycon_side_change(wxCommandEvent& event);\n\tvoid on_joycon_orientation_change(wxCommandEvent& event);\n",
+        "declare manual Joy-Con side handler",
+    )
     header = replace_exact(header, fields_end, fields + fields_end, "add V26 Joy-Con GUI state")
     write_text(header_path, header)
     print("Adapted exact V26 Joy-Con settings UI/dialogs to PRE paths while retaining PRE pairing")

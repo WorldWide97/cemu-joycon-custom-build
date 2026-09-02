@@ -88,11 +88,14 @@ jobs:
           if ($provider -notmatch "processCalibratedMotionSample") { throw "V26 calibrated Joy-Con path missing" }
           if ($controller -notmatch "joycon_pointer_calibration_period_s") { throw "V26 profile compatibility missing" }
           if ($controller -notmatch "V26: V5's legacy hotkey swap") { throw "V26 hotkey semantics missing" }
+          if ($controller -notmatch "joycon_side_override") { throw "SDL2 manual Joy-Con side fallback missing" }
           if ($wpad -notmatch "update_joycon_pointer") { throw "V26 WPAD pointer path missing" }
           if ($provider -match "SDL3/" -or $controller -match "SDL3/") { throw "SDL3 include leaked into PRE build" }
           if ($inputSettings -notmatch "wxScrolledWindow") { throw "V26 resizable input settings layout missing" }
           if ($wiimotePanel -notmatch "Dolphin-style input") { throw "V26 motion settings UI missing" }
           if ($wiimotePanel -notmatch "Pointer Calibration Period") { throw "V26 pointer calibration UI missing" }
+          if ($wiimotePanel -notmatch "choose Joy-Con side") { throw "Always-visible SDL Joy-Con fallback UI missing" }
+          if ($wiimotePanel -notmatch 'm_joycon_side->Append\(_\("Left"\)\)') { throw "Manual Left/Right selector missing" }
           if ($wiimotePanel -notmatch "on_pair_button") { throw "PRE Wii controller pairing UI was lost" }
           Write-Host "V26 Joy-Con runtime and settings UI present; PRE pairing behavior retained."
 
@@ -133,7 +136,7 @@ jobs:
         shell: pwsh
         run: cmake --build cemu/build --config release
 
-      - name: Package final V33 test build
+      - name: Package corrected V33 test build
         shell: pwsh
         run: |
           $exe = "cemu\bin\Cemu_release.exe"
@@ -151,6 +154,9 @@ jobs:
           V26 settings backport: resizable/scrolled input window, per-Joy-Con orientation and
           hotkeys, combined Dolphin-style motion/pointer dialog, live sensor/calibration status,
           FOV/deadzone/smoothing/inversion/scales and recenter binding.
+          PRE SDL2 compatibility fix: the Joy-Con panel is always shown for a selected SDL device.
+          If Auto cannot identify the Bluetooth/driver name, choose Side = Left or Right once;
+          the selection is saved in that controller profile and activates motion/pointer runtime.
           PRE's Wii/Wii U controller pairing button remains available.
 
           Intentionally not moved: V26 LatteTiming/fast-forward changes. They are unrelated to
@@ -161,13 +167,12 @@ jobs:
           "@ | Set-Content "package\README-V33.txt" -Encoding utf8
           $hash = (Get-FileHash "package\Cemu.exe" -Algorithm SHA256).Hash
           "Cemu.exe SHA-256: $hash" | Set-Content "package\SHA256.txt" -Encoding ascii
-          Compress-Archive -Path "package\*" -DestinationPath "Cemu-V33-PRE1257-V26-JoyCon-Windows-x64.zip" -CompressionLevel Optimal -Force
           Write-Host "V33 SHA-256: $hash"
 
       - name: Upload V33 Windows build
         uses: actions/upload-artifact@v6
         with:
-          name: Cemu-V33-PRE1257-V26-JoyCon-Windows-x64
-          path: Cemu-V33-PRE1257-V26-JoyCon-Windows-x64.zip
+          name: Cemu-V33-PRE1257-V26-JoyCon-Fixed-Windows-x64
+          path: package/*
           if-no-files-found: error
           retention-days: 30
