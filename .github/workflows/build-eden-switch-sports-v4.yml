@@ -1,0 +1,175 @@
+name: Build Eden Switch Sports V4 Trace
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-eden-switch-sports-v4.yml'
+      - 'tools/apply-eden-switch-sports-v4.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      - name: Checkout Eden v0.0.4-rc3
+        uses: actions/checkout@v4
+        with:
+          repository: eden-emulator/mirror
+          ref: v0.0.4-rc3
+          path: eden
+          fetch-depth: 1
+
+      - name: Apply deterministic V1 V2 V3 V4 transforms and verify source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $marker = 'SWITCH_SPORTS_TRACE_V4_20260823'
+          Set-Location eden
+          python ../custom/tools/apply-eden-switch-sports-v4.py
+          if ($LASTEXITCODE -ne 0) { throw "V4 source transformer failed with exit code $LASTEXITCODE" }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw "git diff --check failed with exit code $LASTEXITCODE" }
+          $sourceText = (Get-Content 'src/core/device_memory_manager.inc' -Raw) + (Get-Content 'src/core/device_memory_manager.h' -Raw)
+          if (-not $sourceText.Contains($marker)) {
+            throw "V4 source marker missing after deterministic transform: $marker"
+          }
+          if (-not (Select-String -Path 'src/video_core/buffer_cache/buffer_cache.h' -SimpleMatch 'next_qword_is_size' -Quiet)) {
+            throw 'V1 SSBO transform missing from source.'
+          }
+          if (-not (Select-String -Path 'src/shader_recompiler/ir_opt/texture_pass.cpp' -SimpleMatch 'no local fallback' -Quiet)) {
+            throw 'V2 bindless transform missing from source.'
+          }
+          if (-not (Select-String -Path 'src/core/device_memory_manager.inc' -SimpleMatch 'boost::container::deque<u32> free_entries' -Quiet)) {
+            throw 'V3 stability transform missing from source.'
+          }
+          Write-Host "SOURCE TRANSFORMS VERIFIED: V1 + V2 + V3 + $marker"
+          git diff -- src/core/device_memory_manager.h src/core/device_memory_manager.inc src/video_core/buffer_cache/buffer_cache.h src/shader_recompiler/ir_opt/texture_pass.cpp
+
+      - name: Enable MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Ensure Ninja is available
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+          cmake --version
+
+      - name: Install Vulkan SDK required by Eden
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Set-Location eden
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/windows/install-vulkan-sdk.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK install failed with exit code $LASTEXITCODE" }
+
+      - name: Configure Eden
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S eden -B eden/build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DENABLE_QT=ON `
+            -DENABLE_QT_TRANSLATION=ON `
+            -DENABLE_SDL2=ON `
+            -DYUZU_USE_BUNDLED_QT=ON `
+            -DYUZU_USE_BUNDLED_SDL2=ON `
+            -DYUZU_USE_BUNDLED_FFMPEG=ON `
+            -DYUZU_USE_CPM=ON `
+            -DENABLE_WEB_SERVICE=OFF `
+            -DUSE_DISCORD_PRESENCE=OFF `
+            -DBUILD_TESTING=OFF `
+            -DYUZU_TESTS=OFF `
+            -DDYNARMIC_TESTS=OFF `
+            -DYUZU_CMD=OFF `
+            -DYUZU_ROOM=OFF `
+            -DYUZU_ROOM_STANDALONE=OFF `
+            -DYUZU_USE_QT_MULTIMEDIA=OFF `
+            -DYUZU_USE_QT_WEB_ENGINE=OFF `
+            -DYUZU_ENABLE_LTO=OFF `
+            -DDYNARMIC_ENABLE_LTO=OFF `
+            -DENABLE_UPDATE_CHECKER=OFF
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed with exit code $LASTEXITCODE" }
+
+      - name: Build Eden and verify executable marker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake --build eden/build --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "Eden build failed with exit code $LASTEXITCODE" }
+          $marker = 'SWITCH_SPORTS_TRACE_V4_20260823'
+          $exe = Join-Path $PWD 'eden/build/bin/eden.exe'
+          if (-not (Test-Path $exe)) { throw 'eden.exe was not produced.' }
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          if (-not $ascii.Contains($marker)) {
+            throw "BUILT eden.exe DOES NOT CONTAIN V4 MARKER: $marker"
+          }
+          Write-Host "BUILT EXE MARKER VERIFIED: $marker"
+          Get-FileHash $exe -Algorithm SHA256 | Format-List
+
+      - name: Package and re-verify V4 trace build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $marker = 'SWITCH_SPORTS_TRACE_V4_20260823'
+          $bin = Join-Path $PWD 'eden/build/bin'
+          $dist = Join-Path $PWD 'dist/Eden-Switch-Sports-V4-Trace-Windows-x64'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "$bin/*" $dist -Recurse -Force
+          Copy-Item 'eden/LICENSE*' $dist -Force -ErrorAction SilentlyContinue
+          Copy-Item 'eden/README*' $dist -Force -ErrorAction SilentlyContinue
+          @'
+          Eden Switch Sports V4 trace build
+          Base: Eden v0.0.4-rc3
+          V1: data-driven NVN SSBO descriptor size detection.
+          V2: per-TexturePass bindless fallback isolation.
+          V3: stable MultiAddressContainer storage backport.
+          V4 trace marker: SWITCH_SPORTS_TRACE_V4_20260823
+          V4 records Map/Unmap activity around 0x8A000000-0x8B000000 and records std::source_location for large ReadBlock/ReadBlockUnsafe callers, specifically to identify who requests the recurring 0x8A400000 4 MiB read.
+          CI refuses to publish unless the deterministic source transforms succeed and the V4 marker exists in source, built eden.exe, and packaged eden.exe.
+          '@ | Set-Content -Path (Join-Path $dist 'SWITCH-SPORTS-V4.txt') -Encoding UTF8
+          $zip = Join-Path $PWD 'dist/Eden-Switch-Sports-V4-Trace-Windows-x64.zip'
+          Compress-Archive -Path "$dist/*" -DestinationPath $zip -Force
+          $verify = Join-Path $PWD 'dist/v4-verify'
+          if (Test-Path $verify) { Remove-Item $verify -Recurse -Force }
+          Expand-Archive -Path $zip -DestinationPath $verify -Force
+          $packagedExe = Get-ChildItem $verify -Filter eden.exe -Recurse | Select-Object -First 1
+          if (-not $packagedExe) { throw 'Packaged ZIP does not contain eden.exe.' }
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($packagedExe.FullName))
+          if (-not $ascii.Contains($marker)) {
+            throw "PACKAGED eden.exe DOES NOT CONTAIN V4 MARKER: $marker"
+          }
+          Write-Host "PACKAGED EXE MARKER VERIFIED: $marker"
+          Get-FileHash $zip -Algorithm SHA256 | Format-List
+          Get-FileHash $packagedExe.FullName -Algorithm SHA256 | Format-List
+
+      - name: Upload V4 trace build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eden-Switch-Sports-V4-Trace-Windows-x64
+          path: dist/Eden-Switch-Sports-V4-Trace-Windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

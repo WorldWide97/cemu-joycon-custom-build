@@ -1,0 +1,176 @@
+diff --git a/src/core/device_memory_manager.h b/src/core/device_memory_manager.h
+index 6dcf7bb22..444444444 100644
+--- a/src/core/device_memory_manager.h
++++ b/src/core/device_memory_manager.h
+@@ -8,6 +8,7 @@
+ #include <deque>
+ #include <memory>
+ #include <mutex>
++#include <source_location>
+ 
+ #include "common/common_types.h"
+ #include "common/range_mutex.h"
+@@ -101,8 +102,12 @@ public:
+     u8* GetSpan(const DAddr src_addr, const std::size_t size);
+     const u8* GetSpan(const DAddr src_addr, const std::size_t size) const;
+ 
+-    void ReadBlock(DAddr address, void* dest_pointer, size_t size);
+-    void ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size);
++    void ReadBlock(DAddr address, void* dest_pointer, size_t size,
++                   std::source_location caller = std::source_location::current());
++    void ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size,
++                         std::source_location caller = std::source_location::current());
+     void WriteBlock(DAddr address, const void* src_pointer, size_t size);
+     void WriteBlockUnsafe(DAddr address, const void* src_pointer, size_t size);
+ 
+diff --git a/src/core/device_memory_manager.inc b/src/core/device_memory_manager.inc
+index 52dff5df9..555555555 100644
+--- a/src/core/device_memory_manager.inc
++++ b/src/core/device_memory_manager.inc
+@@ -5,8 +5,11 @@
+ #include <limits>
+ #include <memory>
+ #include <type_traits>
++#include <vector>
++
++#include <boost/container/deque.hpp>
+ 
+ #include "common/address_space.h"
+ #include "common/address_space.inc"
+ #include "common/alignment.h"
+@@ -27,21 +30,23 @@ public:
+ 
+     void GatherValues(u32 start_entry, Common::ScratchBuffer<u32>& buffer) {
+         buffer.resize(8);
+-        buffer.resize(0);
+-        size_t index = 0;
+-        const auto add_value = [&](u32 value) {
+-            buffer.resize(index + 1);
++        const auto add_value = [&buffer](u32 value, size_t index) {
++            if (buffer.size() < index + 1) {
++                buffer.resize(index + 8);
++            }
+             buffer[index++] = value;
++            return index;
+         };
+ 
++        size_t index = 0;
+         u32 iter_entry = start_entry;
+         Entry* current = &storage[iter_entry - 1];
+-        add_value(current->value);
++        index = add_value(current->value, index);
+         while (current->next_entry != 0) {
+             iter_entry = current->next_entry;
+             current = &storage[iter_entry - 1];
+-            add_value(current->value);
++            index = add_value(current->value, index);
+         }
++        buffer.resize(index);
+     }
+ 
+     u32 Register(u32 value) {
+@@ -116,8 +121,8 @@ private:
+         u32 value{};
+     };
+ 
+-    std::deque<Entry> storage;
+-    std::deque<u32> free_entries;
++    std::vector<Entry> storage;
++    boost::container::deque<u32> free_entries;
+ };
+ 
+ struct EmptyAllocator {
+@@ -210,6 +215,13 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
+                                       bool track) {
++    const DAddr trace_end = address + static_cast<DAddr>(size);
++    const bool v4_trace = size >= (1ULL << 20) ||
++                          (address < 0x000000008B000000ULL &&
++                           trace_end > 0x000000008A000000ULL);
++    if (v4_trace) {
++        LOG_INFO(HW_Memory, "SWITCH_SPORTS_TRACE_V4_20260823 MAP daddr={:#016x} vaddr={:#016x} size={} asid={} track={}",
++                 address, virtual_address, size, asid.id, track);
++    }
+     Core::Memory::Memory* process_memory = registered_processes[asid.id];
+     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
+     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+@@ -246,6 +258,12 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
+ 
+ template <typename Traits>
+ void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
++    const DAddr trace_end = address + static_cast<DAddr>(size);
++    if (size >= (1ULL << 20) ||
++        (address < 0x000000008B000000ULL && trace_end > 0x000000008A000000ULL)) {
++        LOG_INFO(HW_Memory, "SWITCH_SPORTS_TRACE_V4_20260823 UNMAP daddr={:#016x} size={}",
++                 address, size);
++    }
+     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
+     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+     device_inter->InvalidateRegion(address, size);
+@@ -413,7 +431,18 @@ void DeviceMemoryManager<Traits>::WalkBlock(const DAddr addr, const std::size_t
+ }
+ 
+ template <typename Traits>
+-void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, size_t size) {
++void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, size_t size,
++                                            std::source_location caller) {
++    const DAddr trace_end = address + static_cast<DAddr>(size);
++    const bool v4_trace = size >= (1ULL << 20) ||
++                          (address < 0x000000008B000000ULL &&
++                           trace_end > 0x000000008A000000ULL);
++    if (v4_trace) {
++        LOG_INFO(HW_Memory,
++                 "SWITCH_SPORTS_TRACE_V4_20260823 READ_SAFE_BEGIN daddr={:#016x} size={} caller={}:{} function={}",
++                 address, size, caller.file_name(), caller.line(), caller.function_name());
++    }
+     device_inter->FlushRegion(address, size);
+     WalkBlock(
+         address, size,
+@@ -421,6 +450,13 @@ void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, s
+             LOG_ERROR(
+                 HW_Memory,
+                 "Unmapped Device ReadBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
+                 current_vaddr, address, size);
++            if (v4_trace) {
++                const size_t page = current_vaddr >> Memory::YUZU_PAGEBITS;
++                LOG_ERROR(HW_Memory,
++                          "SWITCH_SPORTS_TRACE_V4_20260823 READ_SAFE_UNMAPPED current={:#016x} page={} phys={} continuity={} caller={}:{} function={}",
++                          current_vaddr, page, compressed_physical_ptr[page], continuity_tracker[page],
++                          caller.file_name(), caller.line(), caller.function_name());
++            }
+             std::memset(dest_pointer, 0, copy_amount);
+         },
+         [&](size_t copy_amount, const u8* const src_ptr) {
+@@ -453,7 +489,18 @@ void DeviceMemoryManager<Traits>::WriteBlock(DAddr address, const void* src_poin
+ }
+ 
+ template <typename Traits>
+-void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size) {
++void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size,
++                                                  std::source_location caller) {
++    const DAddr trace_end = address + static_cast<DAddr>(size);
++    const bool v4_trace = size >= (1ULL << 20) ||
++                          (address < 0x000000008B000000ULL &&
++                           trace_end > 0x000000008A000000ULL);
++    if (v4_trace) {
++        LOG_INFO(HW_Memory,
++                 "SWITCH_SPORTS_TRACE_V4_20260823 READ_UNSAFE_BEGIN daddr={:#016x} size={} caller={}:{} function={}",
++                 address, size, caller.file_name(), caller.line(), caller.function_name());
++    }
+     WalkBlock(
+         address, size,
+         [&](size_t copy_amount, DAddr current_vaddr) {
+@@ -461,6 +508,13 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
+             LOG_ERROR(
+                 HW_Memory,
+                 "Unmapped Device ReadBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
+                 current_vaddr, address, size);
++            if (v4_trace) {
++                const size_t page = current_vaddr >> Memory::YUZU_PAGEBITS;
++                LOG_ERROR(HW_Memory,
++                          "SWITCH_SPORTS_TRACE_V4_20260823 READ_UNSAFE_UNMAPPED current={:#016x} page={} phys={} continuity={} caller={}:{} function={}",
++                          current_vaddr, page, compressed_physical_ptr[page], continuity_tracker[page],
++                          caller.file_name(), caller.line(), caller.function_name());
++            }
+             std::memset(dest_pointer, 0, copy_amount);
+         },
+         [&](size_t copy_amount, const u8* const src_ptr) {
